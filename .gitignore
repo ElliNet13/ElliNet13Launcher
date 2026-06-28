@@ -219,3 +219,7 @@ __marimo__/
 
 # Minecraft files
 minecraft_runtime/
+minecraft/
+
+# Launcher files
+config.properties
