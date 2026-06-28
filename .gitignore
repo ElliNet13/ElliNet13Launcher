@@ -220,6 +220,7 @@ __marimo__/
 # Minecraft files
 minecraft_runtime/
 minecraft/
+logs/
 
 # Launcher files
 config.properties

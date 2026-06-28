@@ -4,6 +4,7 @@ import signal
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+from pathlib import Path
 
 ASSETS_BASE = "https://resources.download.minecraft.net/"
 STOP_EVENT = threading.Event()
@@ -14,6 +15,12 @@ def handle_sigint(signum, frame):
         print("\nInterrupted by user. Stopping...")
         STOP_EVENT.set()
 
+def is_valid_file(path, expected_size=None):
+    if not path.exists():
+        return False
+    if expected_size is not None:
+        return path.stat().st_size == expected_size
+    return path.stat().st_size > 0
 
 signal.signal(signal.SIGINT, handle_sigint)
 
@@ -41,23 +48,37 @@ def download_file(url, path):
 def download_single_asset(args):
     key, value, output_dir = args
 
-    hash = value["hash"]
-    subdir = hash[:2]
-    url = f"{ASSETS_BASE}{subdir}/{hash}"
+    hash_val = value["hash"]
+    size = value["size"]
 
-    dest = os.path.join(output_dir, "assets", key.replace("/", os.sep))
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    subdir = hash_val[:2]
+    url = f"{ASSETS_BASE}{subdir}/{hash_val}"
+
+    dest = os.path.join(
+        output_dir,
+        "assets",
+        "objects",
+        hash_val[:2],
+        hash_val
+    )
+
+    if is_valid_file(Path(dest), size):
+        return True
 
     if STOP_EVENT.is_set():
         return False
 
     try:
-        r = session.get(url, timeout=15)
+        r = session.get(url, stream=True, timeout=15)
         r.raise_for_status()
 
-        with open(dest, "wb") as f:
-            f.write(r.content)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
 
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(8192):
+                if STOP_EVENT.is_set():
+                    return False
+                f.write(chunk)
         return True
 
     except Exception as e:
@@ -65,7 +86,6 @@ def download_single_asset(args):
             return False
         print(f"Failed: {key} -> {e}")
         return False
-
 
 def download_assets(asset_index, output_dir="pack", workers=12):
     objects = asset_index["objects"]

@@ -11,6 +11,7 @@ from javaproperties import Properties
 import shutil
 import sys
 import traceback
+from tqdm import tqdm
 
 # Load config
 config = Properties()
@@ -136,37 +137,17 @@ def download_game(version, workers=30):
 
     # ---------------- ASSETS ----------------
     print("Downloading assets...")
-    asset_index_url = version_json["assetIndex"]["url"]
 
+    asset_index_url = version_json["assetIndex"]["url"]
     r = session.get(asset_index_url)
     r.raise_for_status()
     asset_index = r.json()
-
-    objects = asset_index.get("objects", {})
-
-    downloaded = 0
-    skipped = 0
-
-    for name, obj in objects.items():
-        hash_val = obj["hash"]
-        size = obj["size"]
-
-        subdir = hash_val[:2]
-        asset_path = assets_dir / "objects" / subdir / hash_val
-
-        url = f"https://resources.download.minecraft.net/{subdir}/{hash_val}"
-
-        if asset_path.exists() and asset_path.stat().st_size == size:
-            skipped += 1
-            continue
-
-        asset_path.parent.mkdir(parents=True, exist_ok=True)
-
-        r = session.get(url)
-        r.raise_for_status()
-
-        asset_path.write_bytes(r.content)
-        downloaded += 1
+    
+    download_assets(
+        asset_index,
+        output_dir=str(assets_dir),
+        workers=workers
+    )
 
     # ---------------- CLIENT JAR ----------------
     print("Checking client jar...")
@@ -183,7 +164,7 @@ def download_game(version, workers=30):
     print("Downloading libraries...")
     classpath = []
 
-    for lib in version_json["libraries"]:
+    for lib in tqdm(version_json["libraries"], desc="Libraries", unit="file"):
         if "downloads" not in lib:
             continue
 
@@ -282,6 +263,7 @@ if __name__ == "__main__":
             start_minecraft(info, username=config["username"], java_path=config["java_path"], version=args.version)
     except KeyboardInterrupt:
         print("\nInterrupted by user. Stopping...")
+        sys.exit(1)
     except KeyError:
         exc_type, exc_value, exc_tb = sys.exc_info()
         tb = traceback.extract_tb(exc_tb)
