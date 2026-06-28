@@ -142,7 +142,18 @@ def download_game(version, workers=30):
     r = session.get(asset_index_url)
     r.raise_for_status()
     asset_index = r.json()
+
+    indexes_dir = assets_dir / "indexes"
+    indexes_dir.mkdir(parents=True, exist_ok=True)
     
+    index_id = version_json["assetIndex"]["id"]
+    index_path = indexes_dir / f"{index_id}.json"
+    
+    if not index_path.exists():
+        with open(index_path, "w", encoding="utf-8") as f:
+            import json
+            json.dump(asset_index, f)
+
     download_assets(
         asset_index,
         output_dir=str(assets_dir),
@@ -164,7 +175,7 @@ def download_game(version, workers=30):
     print("Downloading libraries...")
     classpath = []
 
-    for lib in tqdm(version_json["libraries"], desc="Libraries", unit="file"):
+    for lib in tqdm(version_json["libraries"], desc="Libraries"):
         if "downloads" not in lib:
             continue
 

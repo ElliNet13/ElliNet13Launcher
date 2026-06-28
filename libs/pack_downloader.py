@@ -56,7 +56,6 @@ def download_single_asset(args):
 
     dest = os.path.join(
         output_dir,
-        "assets",
         "objects",
         hash_val[:2],
         hash_val
