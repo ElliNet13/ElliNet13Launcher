@@ -13,6 +13,7 @@ import sys
 import traceback
 from tqdm import tqdm
 from libs.mcauth3 import MCMSA
+from typing import Tuple, Optional
 
 # Load config
 configfile = "config.properties"
@@ -218,6 +219,41 @@ def download_game(version, workers=30):
     }
 
 
+# Microsoft auth flow
+def auth_microsoft(auth: MCMSA) -> Tuple[Optional[str], Optional[str]]:
+                # Get device code for user verification
+            print("=== Minecraft Authentication ===")
+            device_info = auth.start_auth()
+
+            print(f"\n1. Open your browser and go to:")
+            print(f"   {device_info['verification_uri']}")
+            print(f"\n2. Enter this code:")
+            print(f"   {device_info['user_code']}")
+            print(f"\n3. The code expires in {device_info['expires_in']//60} minutes")
+
+            # Wait for user to complete verification
+            input("\nPress Enter after you've completed the verification in your browser...")
+            # 4. Complete authentication
+            try:
+                result = auth.finish_auth(device_info)
+
+                # 5. Use the authentication result
+                print(f"\n[!] Authentication Successful!")
+                print(f"   Player: {result['profile']['name']}")
+                print(f"   UUID: {result['profile']['id']}")
+
+                config["do_not_share_-_microsoft_account_refresh_token"] = result['tokens']['microsoft_refresh_token']
+                save_config()
+
+                minecraft_access_token = result["tokens"]["minecraft_access_token"]
+                profile = result["profile"]
+
+                return minecraft_access_token, profile
+
+            except Exception as e:
+                print(f"\n[X] Authentication failed: {e}")
+                return None, None
+
 # ---------------- START MINECRAFT ----------------
 
 def start_minecraft(info, version, username="Player", java_path="java", auth: MCMSA|None = None):
@@ -253,42 +289,27 @@ def start_minecraft(info, version, username="Player", java_path="java", auth: MC
     ]
 
     if auth:
+        should_reauth = False
         if config.get("do_not_share_-_microsoft_account_refresh_token"):
-            result = auth.refresh_and_get_minecraft(config["do_not_share_-_microsoft_account_refresh_token"])
-            config["do_not_share_-_microsoft_account_refresh_token"] = result["refresh_token"]
-            save_config()
-            minecraft_access_token = result["minecraft_access_token"]
-            profile = result["profile"]
-        else:
-            # Get device code for user verification
-            print("=== Minecraft Authentication ===")
-            device_info = auth.start_auth()
-
-            print(f"\n1. Open your browser and go to:")
-            print(f"   {device_info['verification_uri']}")
-            print(f"\n2. Enter this code:")
-            print(f"   {device_info['user_code']}")
-            print(f"\n3. The code expires in {device_info['expires_in']//60} minutes")
-
-            # Wait for user to complete verification
-            input("\nPress Enter after you've completed the verification in your browser...")
-            # 4. Complete authentication
             try:
-                result = auth.finish_auth(device_info)
-
-                # 5. Use the authentication result
-                print(f"\n[!] Authentication Successful!")
-                print(f"   Player: {result['profile']['name']}")
-                print(f"   UUID: {result['profile']['id']}")
-
-                config["do_not_share_-_microsoft_account_refresh_token"] = result['tokens']['microsoft_refresh_token']
+                result = auth.refresh_and_get_minecraft(config["do_not_share_-_microsoft_account_refresh_token"])
+                config["do_not_share_-_microsoft_account_refresh_token"] = result["refresh_token"]
                 save_config()
-
-                minecraft_access_token = result["tokens"]["minecraft_access_token"]
+                minecraft_access_token = result["minecraft_access_token"]
                 profile = result["profile"]
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 400:
+                    print("[!] Microsoft refresh token expired. Re-authenticating...")
+                    should_reauth = True
+        else:
+            should_reauth = True
 
-            except Exception as e:
-                print(f"\n[X] Authentication failed: {e}")
+        if should_reauth:
+            minecraft_access_token, profile = auth_microsoft(auth) # type: ignore
+            minecraft_access_token: str = minecraft_access_token
+            profile: dict = profile
+            if not minecraft_access_token or not profile:
+                print("Authentication failed. To not use Microsoft change use_microsoft_account in config.properties to False.")
                 return
 
         print(f"Hello {profile['name']}! You logged in with Microsoft.")
