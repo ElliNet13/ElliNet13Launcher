@@ -281,7 +281,7 @@ def start_minecraft(info, version, username="Player", java_path="java", auth: MC
                 print(f"   Player: {result['profile']['name']}")
                 print(f"   UUID: {result['profile']['id']}")
 
-                config["do_not_share_-_microsoft_account_refresh_token"] = result['tokens']['minecraft_access_token']
+                config["do_not_share_-_microsoft_account_refresh_token"] = result['tokens']['microsoft_refresh_token']
                 save_config()
 
                 minecraft_access_token = result["tokens"]["minecraft_access_token"]
