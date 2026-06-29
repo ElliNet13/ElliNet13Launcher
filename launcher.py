@@ -14,6 +14,11 @@ import traceback
 from tqdm import tqdm
 from libs.mcauth3 import MCMSA
 from typing import Tuple, Optional
+import customtkinter as ctk
+from tkinter import PhotoImage
+import webbrowser
+from concurrent.futures import Future
+import time
 
 # Load config
 configfile = "config.properties"
@@ -24,7 +29,7 @@ with open(configfile, "r", encoding="latin-1") as f:
 
 def save_config():
     with open(configfile, "w", encoding="latin-1") as f:
-        PropertiesFile.dump(config, f)
+        config.dump(f)
 
 # ---------------- CACHE HELPERS ----------------
 
@@ -253,10 +258,22 @@ def auth_microsoft(auth: MCMSA) -> Tuple[Optional[str], Optional[str]]:
             except Exception as e:
                 print(f"\n[X] Authentication failed: {e}")
                 return None, None
+            
+
+# ---------------- VERIFY ----------------
+def verify_version(version):
+    manifest = grab_minecraft_manifest()
+
+    versions = manifest.get("versions", [])
+
+    for v in versions:
+        if v.get("id") == version:
+            return True
+
+    return False
 
 # ---------------- START MINECRAFT ----------------
-
-def start_minecraft(info, version, username="Player", java_path="java", auth: MCMSA|None = None):
+def start_minecraft(info, version, username="Player", java_path="java", auth: MCMSA|None = None, profile:None|dict=None, minecraft_access_token:None|str=None): # type: ignore
     version_json = info["version_json"]
     classpath = info["classpath"]
     natives_dir = info["natives_dir"]
@@ -288,29 +305,34 @@ def start_minecraft(info, version, username="Player", java_path="java", auth: MC
         "--assetIndex", asset_index,
     ]
 
-    if auth:
+    if auth or (minecraft_access_token and profile):
         should_reauth = False
-        if config.get("do_not_share_-_microsoft_account_refresh_token"):
-            try:
-                result = auth.refresh_and_get_minecraft(config["do_not_share_-_microsoft_account_refresh_token"])
-                config["do_not_share_-_microsoft_account_refresh_token"] = result["refresh_token"]
-                save_config()
-                minecraft_access_token = result["minecraft_access_token"]
-                profile = result["profile"]
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 400:
-                    print("[!] Microsoft refresh token expired. Re-authenticating...")
-                    should_reauth = True
-        else:
-            should_reauth = True
 
-        if should_reauth:
-            minecraft_access_token, profile = auth_microsoft(auth) # type: ignore
-            minecraft_access_token: str = minecraft_access_token
-            profile: dict = profile
-            if not minecraft_access_token or not profile:
-                print("Authentication failed. To not use Microsoft change use_microsoft_account in config.properties to False.")
-                return
+        if auth:
+            if config.get("do_not_share_-_microsoft_account_refresh_token"):
+                try:
+                    result = auth.refresh_and_get_minecraft(config["do_not_share_-_microsoft_account_refresh_token"])
+                    config["do_not_share_-_microsoft_account_refresh_token"] = result["refresh_token"]
+                    save_config()
+                    minecraft_access_token = result["minecraft_access_token"]
+                    profile = result["profile"]
+                except requests.exceptions.HTTPError as e:
+                    if e.response.status_code == 400:
+                        print("[!] Microsoft refresh token expired. Re-authenticating...")
+                        should_reauth = True
+            else:
+                should_reauth = True
+
+            if should_reauth:
+                minecraft_access_token, profile = auth_microsoft(auth) # type: ignore
+                minecraft_access_token = minecraft_access_token
+                profile = profile
+                if not minecraft_access_token or not profile:
+                    print("Authentication failed. To not use Microsoft change use_microsoft_account in config.properties to False.")
+                    return
+            
+        assert profile is not None
+        assert minecraft_access_token is not None
 
         print(f"Hello {profile['name']}! You logged in with Microsoft.")
         cmd.extend([
@@ -333,17 +355,184 @@ def start_minecraft(info, version, username="Player", java_path="java", auth: MC
     subprocess.run(cmd)
 
 
+# ---------------- GUI ----------------
+
+def exit_gui(app: ctk.CTk):
+    config["geometry"] = f"{app.winfo_width()}x{app.winfo_height()}+{app.winfo_x()}+{app.winfo_y()}"
+    save_config()
+    app.destroy()
+
+def start_gui():
+    ctk.set_appearance_mode("dark")
+    ctk.set_default_color_theme("blue")
+
+    def ui(fn):
+        app.after(0, fn)
+
+    app = ctk.CTk()
+    app.title("ElliNet13 Launcher")
+    app.geometry(config.get("geometry", "800x600"))
+    app.protocol("WM_DELETE_WINDOW", lambda: exit_gui(app))
+    app.resizable(False, False)
+
+    version = ctk.StringVar()
+
+    container = ctk.CTkFrame(app, fg_color="transparent")
+    container.pack(expand=True)
+
+    mainLabel = ctk.CTkLabel(container, text="Version")
+    versionEntry = ctk.CTkEntry(container, textvariable=version)
+    mainLabel.pack(pady=5)
+    versionEntry.pack()
+
+    playButton = ctk.CTkButton(
+        container,
+        text="Play",
+        command=lambda: threading.Thread(
+            target=launch_from_gui,
+            args=(version, app, container, mainLabel, versionEntry, playButton),
+            daemon=True
+        ).start()
+    )
+    playButton.pack(pady=20)
+
+    app.mainloop()
+
+def launch_from_gui(versionString: ctk.StringVar, app: ctk.CTk, container: ctk.CTkFrame, mainLabel: ctk.CTkLabel, versionEntry: ctk.CTkEntry, playButton: ctk.CTkButton):
+    def ui(fn):
+        app.after(0, fn)
+
+    version = versionString.get()
+
+    ui(lambda: playButton.destroy())
+    ui(lambda: versionEntry.destroy())
+    ui(lambda: mainLabel.configure(text=f"Loading data for Minecraft version {version}..."))
+
+    if not verify_version(version):
+        ui(lambda: mainLabel.configure(text=f"Version {version} not found."))
+        ui(lambda: ctk.CTkButton(container, text="Exit", command=lambda: exit_gui(app)).pack(pady=20))
+        return
+
+    ui(lambda: mainLabel.configure(text=f"Downloading Minecraft version {version}..."))
+    info = download_game(version)
+
+    ui(lambda: mainLabel.configure(text="Checking Microsoft authentication..."))
+
+    if config["use_microsoft_account"].lower() == "true":
+        auth = MCMSA()
+
+        should_reauth = False
+
+        if config.get("do_not_share_-_microsoft_account_refresh_token"):
+            try:
+                result = auth.refresh_and_get_minecraft(
+                    config["do_not_share_-_microsoft_account_refresh_token"]
+                )
+                config["do_not_share_-_microsoft_account_refresh_token"] = result["refresh_token"]
+                save_config()
+
+                minecraft_access_token = result["minecraft_access_token"]
+                profile = result["profile"]
+
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 400:
+                    should_reauth = True
+        else:
+            should_reauth = True
+
+        if should_reauth:
+            future = Future()
+            ui(lambda: auth_microsoft_gui(auth, app, future))
+            result = future.result()
+            minecraft_access_token = result[0]
+            profile = result[1]
+        
+        ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}..."))
+        time.sleep(1)
+        ui(lambda: exit_gui(app))
+        start_minecraft(info, version=version, java_path=config["java_path"], minecraft_access_token=minecraft_access_token, profile=profile)
+
+def copy_to_clipboard(text: str, app: ctk.CTk):
+    app.clipboard_clear()
+    app.clipboard_append(text)
+
+def auth_microsoft_gui(auth: MCMSA, original_app: ctk.CTk, future: Future):
+    app = ctk.CTkToplevel(original_app)
+    app.title("Login with Microsoft")
+
+    width = 300
+    height = 300
+
+    # Make sure window sizes are up to date
+    original_app.update_idletasks()
+
+    # Get parent window position and size
+    parent_x = original_app.winfo_x()
+    parent_y = original_app.winfo_y()
+    parent_w = original_app.winfo_width()
+    parent_h = original_app.winfo_height()
+
+    # Calculate center position
+    x = parent_x + (parent_w // 2) - (width // 2)
+    y = parent_y + (parent_h // 2) - (height // 2)
+
+    app.geometry(f"{width}x{height}+{x}+{y}")
+    
+    app.transient(original_app)
+    app.lift()
+
+    device_info = auth.start_auth()
+
+    container = ctk.CTkFrame(app, fg_color="transparent")
+    container.pack(expand=True)
+    ctk.CTkLabel(container, text="1. Open your browser and go to:").pack(pady=5)
+    ctk.CTkLabel(container, text=device_info["verification_uri"]).pack(pady=5)
+    ctk.CTkLabel(container, text="2. Enter the code:").pack(pady=5)
+    ctk.CTkLabel(container, text=device_info["user_code"]).pack(pady=5)
+    ctk.CTkLabel(container, text=f"3. The code expires in {device_info['expires_in']//60} minutes").pack(pady=5)
+
+    ctk.CTkButton(container, text="Open browser", command=lambda: webbrowser.open(device_info["verification_uri"])).pack(pady=5)
+    ctk.CTkButton(container, text="Copy code", command=lambda: copy_to_clipboard(device_info["user_code"], original_app)).pack(pady=5)
+    ctk.CTkButton(container, text="I have completed the verification in browser", command=lambda: continue_auth()).pack(pady=5)
+
+    def continue_auth():
+        container.destroy()
+        try:
+            result = auth.finish_auth(device_info)
+
+            minecraft_access_token = result["tokens"]["minecraft_access_token"]
+            minecraft_refresh_token = result["tokens"]["microsoft_refresh_token"]
+
+            config["do_not_share_-_microsoft_account_refresh_token"] = minecraft_refresh_token
+            save_config()
+
+            app.destroy()
+
+            future.set_result((minecraft_access_token, result["profile"]))
+        except Exception as e:
+            print(f"Authentication failed: {e}")
+            ctk.CTkLabel(container, text=f"Authentication failed: {e}").pack(pady=20)
+            ctk.CTkButton(container, text="Exit", command=lambda: exit_gui(original_app)).pack(pady=20)
+
+
 # ---------------- MAIN ----------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("version", type=str)
+    parser.add_argument("-v", "--version", type=str, required=False)
     parser.add_argument("-w", "--workers", type=int, default=30)
     parser.add_argument("--dont-run", action="store_false", dest="run")
 
     args = parser.parse_args()
 
     try:
+        if args.version is None:
+            start_gui()
+            sys.exit(0)
+
+        if not verify_version(args.version):
+            raise ValueError(f"Minecraft version {args.version} not found.")
+        
         info = download_game(args.version, workers=args.workers)
 
         if args.run:
