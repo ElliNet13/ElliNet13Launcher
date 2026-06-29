@@ -7,18 +7,23 @@ from pathlib import Path
 import platform
 import subprocess
 import hashlib
-from javaproperties import Properties
+from javaproperties import PropertiesFile
 import shutil
 import sys
 import traceback
 from tqdm import tqdm
+from libs.mcauth3 import MCMSA
 
 # Load config
-config = Properties()
+configfile = "config.properties"
 if not os.path.exists("config.properties"):
     shutil.copyfile("config.template.properties", "config.properties")
-with open("config.properties", "rb") as f:
-    config.load(f)
+with open(configfile, "r", encoding="latin-1") as f:
+    config = PropertiesFile.load(f)
+
+def save_config():
+    with open(configfile, "w", encoding="latin-1") as f:
+        PropertiesFile.dump(config, f)
 
 # ---------------- CACHE HELPERS ----------------
 
@@ -145,10 +150,10 @@ def download_game(version, workers=30):
 
     indexes_dir = assets_dir / "indexes"
     indexes_dir.mkdir(parents=True, exist_ok=True)
-    
+
     index_id = version_json["assetIndex"]["id"]
     index_path = indexes_dir / f"{index_id}.json"
-    
+
     if not index_path.exists():
         with open(index_path, "w", encoding="utf-8") as f:
             import json
@@ -215,7 +220,7 @@ def download_game(version, workers=30):
 
 # ---------------- START MINECRAFT ----------------
 
-def start_minecraft(info, version, username="Player", java_path="java"):
+def start_minecraft(info, version, username="Player", java_path="java", auth: MCMSA|None = None):
     version_json = info["version_json"]
     classpath = info["classpath"]
     natives_dir = info["natives_dir"]
@@ -241,16 +246,66 @@ def start_minecraft(info, version, username="Player", java_path="java"):
         "-cp",
         cp,
         main_class,
-
-        "--username", username,
-        "--uuid", "00000000-0000-0000-0000-000000000000",
-        "--accessToken", "0",
         "--version", version,
         "--gameDir", game_dir,
         "--assetsDir", assets_dir,
         "--assetIndex", asset_index,
-        "--userType", "legacy"
     ]
+
+    if auth:
+        if config.get("do_not_share_-_microsoft_account_refresh_token"):
+            result = auth.refresh_and_get_minecraft(config["do_not_share_-_microsoft_account_refresh_token"])
+            config["do_not_share_-_microsoft_account_refresh_token"] = result["refresh_token"]
+            save_config()
+            minecraft_access_token = result["minecraft_access_token"]
+            profile = result["profile"]
+        else:
+            # Get device code for user verification
+            print("=== Minecraft Authentication ===")
+            device_info = auth.start_auth()
+
+            print(f"\n1. Open your browser and go to:")
+            print(f"   {device_info['verification_uri']}")
+            print(f"\n2. Enter this code:")
+            print(f"   {device_info['user_code']}")
+            print(f"\n3. The code expires in {device_info['expires_in']//60} minutes")
+
+            # Wait for user to complete verification
+            input("\nPress Enter after you've completed the verification in your browser...")
+            # 4. Complete authentication
+            try:
+                result = auth.finish_auth(device_info)
+
+                # 5. Use the authentication result
+                print(f"\n[!] Authentication Successful!")
+                print(f"   Player: {result['profile']['name']}")
+                print(f"   UUID: {result['profile']['id']}")
+
+                config["do_not_share_-_microsoft_account_refresh_token"] = result['tokens']['minecraft_access_token']
+                save_config()
+
+                minecraft_access_token = result["tokens"]["minecraft_access_token"]
+                profile = result["profile"]
+
+            except Exception as e:
+                print(f"\n[X] Authentication failed: {e}")
+                return
+
+        print(f"Hello {profile['name']}! You logged in with Microsoft.")
+        cmd.extend([
+            "--userType", "msa",
+            "--uuid", profile["id"],
+            "--accessToken", minecraft_access_token,
+            "--username", profile["name"]
+        ])
+
+    else:
+        cmd.extend([
+            "--userType", "legacy",
+            "--uuid", "00000000-0000-0000-0000-000000000000",
+            "--accessToken", "0",
+            "--username", username
+        ])
 
     print("\nLaunching Minecraft...\n")
 
@@ -271,7 +326,11 @@ if __name__ == "__main__":
         info = download_game(args.version, workers=args.workers)
 
         if args.run:
-            start_minecraft(info, username=config["username"], java_path=config["java_path"], version=args.version)
+            if config["use_microsoft_account"].lower() == "true":
+                mcmsa = MCMSA()
+            else:
+                mcmsa = None
+            start_minecraft(info, username=config["username"], java_path=config["java_path"], version=args.version, auth=mcmsa)
     except KeyboardInterrupt:
         print("\nInterrupted by user. Stopping...")
         sys.exit(1)
