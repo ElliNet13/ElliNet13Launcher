@@ -14,6 +14,10 @@ import traceback
 from tqdm import tqdm
 from libs.mcauth3 import MCMSA
 from typing import Tuple, Optional
+from textual.app import App, ComposeResult
+from textual.widgets import Header, Footer, Button, Static, Input
+from textual.screen import Screen, ModalScreen
+from textual import work
 
 # Load config
 configfile = "config.properties"
@@ -256,7 +260,7 @@ def auth_microsoft(auth: MCMSA) -> Tuple[Optional[str], Optional[str]]:
 
 # ---------------- START MINECRAFT ----------------
 
-def start_minecraft(info, version, username="Player", java_path="java", auth: MCMSA|None = None):
+def start_minecraft(info, version, username="Player", java_path="java", auth: MCMSA|None = None, profile:None|dict=None, minecraft_access_token:None|str=None): # type: ignore
     version_json = info["version_json"]
     classpath = info["classpath"]
     natives_dir = info["natives_dir"]
@@ -288,29 +292,34 @@ def start_minecraft(info, version, username="Player", java_path="java", auth: MC
         "--assetIndex", asset_index,
     ]
 
-    if auth:
+    if auth or (minecraft_access_token and profile):
         should_reauth = False
-        if config.get("do_not_share_-_microsoft_account_refresh_token"):
-            try:
-                result = auth.refresh_and_get_minecraft(config["do_not_share_-_microsoft_account_refresh_token"])
-                config["do_not_share_-_microsoft_account_refresh_token"] = result["refresh_token"]
-                save_config()
-                minecraft_access_token = result["minecraft_access_token"]
-                profile = result["profile"]
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 400:
-                    print("[!] Microsoft refresh token expired. Re-authenticating...")
-                    should_reauth = True
-        else:
-            should_reauth = True
 
-        if should_reauth:
-            minecraft_access_token, profile = auth_microsoft(auth) # type: ignore
-            minecraft_access_token: str = minecraft_access_token
-            profile: dict = profile
-            if not minecraft_access_token or not profile:
-                print("Authentication failed. To not use Microsoft change use_microsoft_account in config.properties to False.")
-                return
+        if auth:
+            if config.get("do_not_share_-_microsoft_account_refresh_token"):
+                try:
+                    result = auth.refresh_and_get_minecraft(config["do_not_share_-_microsoft_account_refresh_token"])
+                    config["do_not_share_-_microsoft_account_refresh_token"] = result["refresh_token"]
+                    save_config()
+                    minecraft_access_token = result["minecraft_access_token"]
+                    profile = result["profile"]
+                except requests.exceptions.HTTPError as e:
+                    if e.response.status_code == 400:
+                        print("[!] Microsoft refresh token expired. Re-authenticating...")
+                        should_reauth = True
+            else:
+                should_reauth = True
+
+            if should_reauth:
+                minecraft_access_token, profile = auth_microsoft(auth) # type: ignore
+                minecraft_access_token = minecraft_access_token
+                profile = profile
+                if not minecraft_access_token or not profile:
+                    print("Authentication failed. To not use Microsoft change use_microsoft_account in config.properties to False.")
+                    return
+            
+        assert profile is not None
+        assert minecraft_access_token is not None
 
         print(f"Hello {profile['name']}! You logged in with Microsoft.")
         cmd.extend([
@@ -332,18 +341,110 @@ def start_minecraft(info, version, username="Player", java_path="java", auth: MC
 
     subprocess.run(cmd)
 
+class LauncherApp(App):
+    CSS = """
+    Screen {
+        align: center middle;
+    }
+
+    Button {
+        margin: 1;
+    }
+    """
+
+    TITLE = "ElliNet13 Launcher"
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("Welcome!")
+        yield Input(
+            placeholder="Type the Minecraft version you want to launch",
+            id="version"
+        )
+        yield Button("Launch Minecraft", id="launch")
+        yield Footer()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.launch_minecraft()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.launch_minecraft()
+
+    def launch_minecraft(self):
+        self.query_one(Static).update("Button clicked!")
+        version = self.query_one("#version", Input).value
+        self.push_screen(LaunchingScreen(version))
+
+class LaunchingScreen(Screen):
+    def __init__(self, version: str):
+        self.version = version
+        super().__init__()
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static(f"Launching Minecraft version {self.version}...")
+        yield Static("Progress: Loading", id="progresstext")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.load_minecraft()
+
+    def update_progress(self, progress: str):
+        self.query_one("#progresstext", Static).update(f"Progress: {progress}")
+
+    @work(thread=True)
+    async def load_minecraft(self) -> None:
+        self.update_progress("Downloading game files...")
+        info = download_game(self.version)
+        self.update_progress("Checking Microsoft account...")
+        if config["use_microsoft_account"] == "true":
+            auth = MCMSA()
+            should_reauth = False
+            if config.get("do_not_share_-_microsoft_account_refresh_token"):
+                try:
+                    result = auth.refresh_and_get_minecraft(config["do_not_share_-_microsoft_account_refresh_token"])
+                    config["do_not_share_-_microsoft_account_refresh_token"] = result["refresh_token"]
+                    save_config()
+                    minecraft_access_token = result["minecraft_access_token"]
+                    profile = result["profile"]
+                except requests.exceptions.HTTPError as e:
+                    if e.response.status_code == 400:
+                        print("[!] Microsoft refresh token expired. Re-authenticating...")
+                        should_reauth = True
+            else:
+                should_reauth = True
+
+            if should_reauth:
+                minecraft_access_token, profile = await self.app.push_screen_wait(MicrosoftLoginScreen())
+
+            self.update_progress("Starting Minecraft...")
+            start_minecraft(info, version=self.version, minecraft_access_token=minecraft_access_token, profile=profile)
+            self.app.exit()
+
+        self.update_progress("Starting Minecraft...")
+        start_minecraft(info, version=self.version)
+
+class MicrosoftLoginScreen(ModalScreen):
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("Logging in with Microsoft...")
+        yield Static("")
+        yield Footer()
 
 # ---------------- MAIN ----------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("version", type=str)
+    parser.add_argument("-v", "--version", type=str, required=False)
     parser.add_argument("-w", "--workers", type=int, default=30)
     parser.add_argument("--dont-run", action="store_false", dest="run")
 
     args = parser.parse_args()
 
     try:
+        if not args.version:
+            LauncherApp().run()
+            sys.exit(0)
+        
         info = download_game(args.version, workers=args.workers)
 
         if args.run:
