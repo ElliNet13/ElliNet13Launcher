@@ -1,7 +1,7 @@
 import time
 import requests
 
-CLIENT_ID = "4a07b708-b86d-4365-a55f-f4f23ecb85ab"
+CLIENT_ID = "4a07b708-b86d-4365-a55f-f4f23ecb85ab" # Switch to 65a6f617-ed8e-4366-8925-2a4b18d7152e when Mojang accepts it
 SCOPE = "XboxLive.signin offline_access openid profile email"
 
 DEVICE_CODE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
@@ -171,6 +171,10 @@ class MCMSA:
         }
 
         response = self.session.post(MC_LOGIN_URL, json=request_body, headers=headers)
+        print("Minecraft login failed")
+        print("Status:", response.status_code)
+        print("Response body:", response.text)
+
         response.raise_for_status()
         return response.json()
 
