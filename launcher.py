@@ -15,10 +15,11 @@ from tqdm import tqdm
 from libs.mcauth3 import MCMSA
 from typing import Tuple, Optional
 import customtkinter as ctk
-from tkinter import PhotoImage
 import webbrowser
 from concurrent.futures import Future
 import time
+import zlib
+import json
 
 # Load config
 configfile = "config.properties"
@@ -30,6 +31,12 @@ with open(configfile, "r", encoding="latin-1") as f:
 def save_config():
     with open(configfile, "w", encoding="latin-1") as f:
         config.dump(f)
+
+def save_list(arr: list) -> str:
+    return zlib.compress(json.dumps(arr, separators=(",", ":")).encode("utf-8")).decode("latin-1")
+
+def load_list(arr: str) -> list:
+    return json.loads(zlib.decompress(arr.encode("latin-1")).decode("utf-8"))
 
 # ---------------- CACHE HELPERS ----------------
 
@@ -350,7 +357,11 @@ def start_minecraft(info, version, username="Player", java_path="java", auth: MC
 
     print("\nLaunching Minecraft...\n")
 
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print("Minecraft crashed!")
+        print(f"Exit code: {e.returncode}")
 
 
 # ---------------- GUI ----------------
@@ -373,43 +384,106 @@ def start_gui():
     app.protocol("WM_DELETE_WINDOW", lambda: exit_gui(app))
     app.resizable(False, False)
 
+    compressedLastVersionsList = config.get("last_versions_list", None)
+    if compressedLastVersionsList:
+        lastVersionsList = load_list(compressedLastVersionsList)
+    else:
+        lastVersionsList = [grab_minecraft_manifest()["latest"]["release"]]
+        config["last_versions_list"] = save_list(lastVersionsList)
+
     version = ctk.StringVar()
 
-    container = ctk.CTkFrame(app, fg_color="transparent")
+    maincontainer = ctk.CTkFrame(app, fg_color="transparent")
+    maincontainer.place(relx=0.5, rely=0.5, anchor="center")
+
+    mainLabel = ctk.CTkLabel(maincontainer, text="Version")
+    mainLabel.pack(pady=5)
+
+    container = ctk.CTkFrame(maincontainer, fg_color="transparent")
     container.pack(expand=True)
 
-    mainLabel = ctk.CTkLabel(container, text="Version")
+    # ---------------- VERSION INPUT ----------------
     versionEntry = ctk.CTkEntry(container, textvariable=version)
-    mainLabel.pack(pady=5)
+
     versionEntry.pack()
 
+    # ---------------- LAST VERSIONS LIST ----------------
+    historyLabel = ctk.CTkLabel(container, text="Last Versions")
+    historyLabel.pack(pady=(10, 5))
+
+    scrollFrame = ctk.CTkScrollableFrame(container, width=250, height=200)
+    scrollFrame.pack(pady=5)
+
+    def set_version(v):
+        version.set(v)
+
+    # show newest first (optional)
+    for v in lastVersionsList:
+        btn = ctk.CTkButton(
+            scrollFrame,
+            text=v,
+            height=28,
+            command=lambda val=v: set_version(val)
+        )
+        btn.pack(fill="x", pady=2, padx=5)
+
+    # ---------------- PLAY BUTTON ----------------
     playButton = ctk.CTkButton(
         container,
         text="Play",
         command=lambda: threading.Thread(
             target=launch_from_gui,
-            args=(version, app, container, mainLabel, versionEntry, playButton),
+            args=(version, app, container, mainLabel, container),
             daemon=True
         ).start()
     )
     playButton.pack(pady=20)
 
+    latestButton = ctk.CTkButton(
+        container,
+        text="Fill in latest release",
+        command=lambda: threading.Thread(
+            target=lambda: set_version(grab_minecraft_manifest()["latest"]["release"]),
+            daemon=True
+        ).start()
+    )
+    latestButton.pack(pady=5)
+
+    latestSnapshotButton = ctk.CTkButton(
+        container,
+        text="Fill in latest snapshot",
+        command=lambda: threading.Thread(
+            target=lambda: set_version(grab_minecraft_manifest()["latest"]["snapshot"]),
+            daemon=True
+        ).start()
+    )
+    latestSnapshotButton.pack(pady=5)
+
     app.mainloop()
 
-def launch_from_gui(versionString: ctk.StringVar, app: ctk.CTk, container: ctk.CTkFrame, mainLabel: ctk.CTkLabel, versionEntry: ctk.CTkEntry, playButton: ctk.CTkButton):
+def launch_from_gui(versionString: ctk.StringVar, app: ctk.CTk, container: ctk.CTkFrame, mainLabel: ctk.CTkLabel, dcontainer: ctk.CTkFrame):
     def ui(fn):
         app.after(0, fn)
 
     version = versionString.get()
 
-    ui(lambda: playButton.destroy())
-    ui(lambda: versionEntry.destroy())
+    ui(lambda: dcontainer.destroy())
     ui(lambda: mainLabel.configure(text=f"Loading data for Minecraft version {version}..."))
 
     if not verify_version(version):
         ui(lambda: mainLabel.configure(text=f"Version {version} not found."))
         ui(lambda: ctk.CTkButton(container, text="Exit", command=lambda: exit_gui(app)).pack(pady=20))
         return
+    
+    versions = load_list(config.get("last_versions_list", "")) or []
+
+    # remove duplicates of current version
+    versions = [v for v in versions if v != version]
+
+    # add to top
+    versions.insert(0, version)
+
+    config["last_versions_list"] = save_list(versions)
 
     ui(lambda: mainLabel.configure(text=f"Downloading Minecraft version {version}..."))
     info = download_game(version)
