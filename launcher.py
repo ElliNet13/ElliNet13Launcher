@@ -20,6 +20,7 @@ from concurrent.futures import Future
 import time
 import zlib
 import json
+import stat
 
 # Load config
 configfile = "config.properties"
@@ -132,11 +133,13 @@ def download_game(version, workers=30):
     version_dir = base_dir / "versions" / version
     libraries_dir = base_dir / "libraries"
     assets_dir = base_dir / "assets"
+    java_runtime_dir = base_dir / "runtimes"
     natives_dir = version_dir / "natives"
 
     version_dir.mkdir(parents=True, exist_ok=True)
     libraries_dir.mkdir(parents=True, exist_ok=True)
     assets_dir.mkdir(parents=True, exist_ok=True)
+    java_runtime_dir.mkdir(parents=True, exist_ok=True)
     natives_dir.mkdir(parents=True, exist_ok=True)
 
     print("Downloading manifest...")
@@ -220,14 +223,25 @@ def download_game(version, workers=30):
 
     classpath.append(str(jar_path))
 
+    # ---------------- JAVA RUNTIME ----------------
+    print("Downloading java runtime...")
+    java_runtime_dir = java_runtime_dir / version_json["javaVersion"]["component"]
+    download_java_runtime(version_json, java_runtime_dir)
+
     print("Done downloading Minecraft.")
+
+    final_java_path = str(java_runtime_dir / "bin/java")
+
+    if platform.system() == "Windows":
+        final_java_path += ".exe"
 
     return {
         "version_json": version_json,
         "classpath": classpath,
         "natives_dir": str(natives_dir),
         "assets_dir": str(assets_dir),
-        "version_dir": str(version_dir)
+        "version_dir": str(version_dir),
+        "java_path": final_java_path,
     }
 
 
@@ -280,7 +294,7 @@ def verify_version(version):
     return False
 
 # ---------------- START MINECRAFT ----------------
-def start_minecraft(info, version, username="Player", java_path="java", auth: MCMSA|None = None, profile:None|dict=None, minecraft_access_token:None|str=None): # type: ignore
+def start_minecraft(info, version, username="Player", auth: MCMSA|None = None, profile:None|dict=None, minecraft_access_token:None|str=None): # type: ignore
     version_json = info["version_json"]
     classpath = info["classpath"]
     natives_dir = info["natives_dir"]
@@ -299,7 +313,7 @@ def start_minecraft(info, version, username="Player", java_path="java", auth: MC
     cp = sep.join(classpath)
 
     cmd = [
-        java_path,
+        info["java_path"],
         f"-Djava.library.path={natives_dir}",
         "-Xmx2G",
         "-Xms1G",
@@ -522,14 +536,14 @@ def launch_from_gui(versionString: ctk.StringVar, app: ctk.CTk, container: ctk.C
         ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}... (Microsoft account)"))
         time.sleep(1)
         ui(lambda: app.withdraw())
-        start_minecraft(info, version=version, java_path=config["java_path"], minecraft_access_token=minecraft_access_token, profile=profile)
+        start_minecraft(info, version=version, minecraft_access_token=minecraft_access_token, profile=profile)
         ui(lambda: exit_gui(app))
         return
         
     ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}... (Offline account)"))
     time.sleep(1)
     ui(lambda: app.withdraw())
-    start_minecraft(info, version=version, java_path=config["java_path"], username=config["username"])
+    start_minecraft(info, version=version, username=config["username"])
     ui(lambda: exit_gui(app))
 
 def copy_to_clipboard(text: str, app: ctk.CTk):
@@ -620,7 +634,7 @@ if __name__ == "__main__":
                 mcmsa = MCMSA()
             else:
                 mcmsa = None
-            start_minecraft(info, username=config["username"], java_path=config["java_path"], version=args.version, auth=mcmsa)
+            start_minecraft(info, username=config["username"], version=args.version, auth=mcmsa)
     except KeyboardInterrupt:
         print("\nInterrupted by user. Stopping...")
         sys.exit(1)

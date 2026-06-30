@@ -5,10 +5,12 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from pathlib import Path
+import platform
+import lzma
+import io
 
 ASSETS_BASE = "https://resources.download.minecraft.net/"
 STOP_EVENT = threading.Event()
-
 
 def handle_sigint(signum, frame):
     if not STOP_EVENT.is_set():
@@ -36,6 +38,115 @@ def grab_version_json(version_info):
     r = session.get(version_info["url"])
     r.raise_for_status()
     return r.json()
+
+def detect_arch():
+    machine = platform.machine().lower()
+
+    # Normalize common Python outputs
+    if machine in ("amd64", "x86_64", "x64"):
+        return "x64"
+    if machine in ("i386", "i686", "x86"):
+        return "x86"
+    if "arm64" in machine or "aarch64" in machine:
+        return "arm64"
+
+    raise Exception(f"Unknown architecture: {machine}")
+
+def grab_java_runtime_manifest():
+    url = "https://launchermeta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json"
+    r = session.get(url)
+    r.raise_for_status()
+    return r.json()
+
+def grab_java_runtime_version_manifest(version_info: dict) -> dict:
+    runtime_index = grab_java_runtime_manifest()
+
+    component = version_info["javaVersion"]["component"]
+
+    system = platform.system().lower()
+    arch = detect_arch()
+
+    # Build exact OS keys (NO guessing fallback selection)
+    if system == "windows":
+        os_key = f"windows-{arch}"
+        if arch not in ["x64", "x86", "arm64"]:
+            raise Exception("Unsupported Windows arch")
+        os_candidates = [os_key]
+
+    elif system == "linux":
+        # Linux is special: x64 uses "linux", 32-bit uses "linux-i386"
+        if arch == "x86":
+            os_candidates = ["linux-i386"]
+        else:
+            os_candidates = ["linux"]
+
+    elif system == "darwin":
+        if arch == "arm64":
+            os_candidates = ["mac-os-arm64"]
+        else:
+            os_candidates = ["mac-os"]
+
+    else:
+        raise Exception(f"Unsupported OS: {system}")
+
+    # Resolve runtime
+    for os_key in os_candidates:
+        os_bucket = runtime_index.get(os_key)
+        if not os_bucket:
+            continue
+
+        runtime_list = os_bucket.get(component)
+        if not runtime_list:
+            continue
+
+        # pick latest entry (Mojang orders newest first usually)
+        runtime_entry = runtime_list[0]
+
+        java_runtime_manifest_url = runtime_entry["manifest"]["url"]
+        java_runtime_manifest = session.get(java_runtime_manifest_url)
+        java_runtime_manifest.raise_for_status()
+
+        return java_runtime_manifest.json()
+
+    raise Exception(
+        f"No runtime found for component={component}, os={system}, arch={arch}"
+    )
+
+def download_java_runtime(version_info: dict, folder: Path):
+    runtime_manifest = grab_java_runtime_version_manifest(version_info)
+    files = runtime_manifest["files"]
+
+    # Create required folders
+    folder.mkdir(parents=True, exist_ok=True)
+
+    for name, info in tqdm(files.items(), total=len(files), desc="Downloading Java Runtime"):
+        name: str
+        info: dict
+        match info.get("type"):
+            case "directory":
+                Path(folder / name).mkdir(parents=True, exist_ok=True)
+
+            case "file":
+                path = folder / name
+                if info["downloads"].get("lzma"):
+                    url = info["downloads"]["lzma"]["url"]
+
+                    if not path.exists():
+                        compressed_file = session.get(url)
+                        compressed_file.raise_for_status()
+
+                        with lzma.open(io.BytesIO(compressed_file.content), "rb") as f:
+                            with open(path, "wb") as out:
+                                out.write(f.read())
+                else:
+                    url = info["downloads"]["raw"]["url"]
+
+                    if not path.exists():
+                        download_file(url, path)
+
+                if info["executable"]:
+                    st = os.stat(path)
+                    os.chmod(path, st.st_mode | 0o111)
 
 def download_file(url, path):
     r = session.get(url, stream=True)
