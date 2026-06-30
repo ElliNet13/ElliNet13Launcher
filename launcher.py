@@ -72,7 +72,13 @@ def asset_exists(asset_path: Path, expected_hash: str):
 
 # ---------------- RULES ----------------
 
-def check_rules(rules):
+def check_rules(rules, is_demo=False, has_custom_resolution=False, has_quick_plays_support=False, is_quick_play_singleplayer=False, is_quick_play_multiplayer=False, is_quick_play_realms=False):
+    """
+    Check if rules allow the argument to be included.
+
+    For feature-based rules, only include the argument if the feature condition is met.
+    Default is to NOT include arguments with feature requirements unless conditions are explicitly true.
+    """
     if not rules:
         return True
 
@@ -85,10 +91,46 @@ def check_rules(rules):
     for rule in rules:
         action = rule.get("action")
 
+        # Check OS-based rules
         if "os" in rule:
             rule_os = rule["os"].get("name")
             if rule_os and rule_os != os_name:
                 continue
+
+            # Check for OS version constraints
+            rule_os_version = rule["os"].get("version")
+            if rule_os_version:
+                # For now, skip OS version checks (would need more complex evaluation)
+                continue
+
+        # Check feature-based rules
+        if "features" in rule:
+            features = rule["features"]
+
+            # Check each feature condition
+            if "is_demo_user" in features:
+                if not features["is_demo_user"] == is_demo:
+                    continue
+
+            if "has_custom_resolution" in features:
+                if not features["has_custom_resolution"] == has_custom_resolution:
+                    continue
+
+            if "has_quick_plays_support" in features:
+                if not features["has_quick_plays_support"] == has_quick_plays_support:
+                    continue
+
+            if "is_quick_play_singleplayer" in features:
+                if not features["is_quick_play_singleplayer"] == is_quick_play_singleplayer:
+                    continue
+
+            if "is_quick_play_multiplayer" in features:
+                if not features["is_quick_play_multiplayer"] == is_quick_play_multiplayer:
+                    continue
+
+            if "is_quick_play_realms" in features:
+                if not features["is_quick_play_realms"] == is_quick_play_realms:
+                    continue
 
         if action == "allow":
             allowed = True
@@ -96,6 +138,134 @@ def check_rules(rules):
             return False
 
     return allowed
+
+
+def parse_jvm_arguments(version_json, natives_dir, classpath, game_dir, assets_dir, asset_index, launcher_name="ElliNet13Launcher", launcher_version="1.0", max_memory="2G", min_memory="1G", logging_config_path=None):
+    """
+    Parse JVM arguments from version JSON and substitute placeholders.
+    """
+    jvm_args = []
+
+    arguments = version_json.get("arguments", {})
+    jvm_arguments = arguments.get("jvm", [])
+
+    # Build substitution map
+    sep = ";" if platform.system().lower() == "windows" else ":"
+    cp = sep.join(classpath)
+
+    subs = {
+        "natives_directory": natives_dir,
+        "classpath": cp,
+        "game_directory": game_dir,
+        "assets_root": assets_dir,
+        "assets_index_name": asset_index,
+        "launcher_name": launcher_name,
+        "launcher_version": launcher_version,
+    }
+
+    # Add logging config path if available
+    if logging_config_path:
+        subs["path"] = logging_config_path
+    else:
+        subs["path"] = ""
+
+    for arg in jvm_arguments:
+        if isinstance(arg, str):
+            # Substitute placeholders
+            result = arg
+            for key, value in subs.items():
+                result = result.replace(f"${{{key}}}", value)
+            jvm_args.append(result)
+        elif isinstance(arg, dict):
+            # Has rules - check if we should include it
+            if check_rules(arg.get("rules", [])):
+                value = arg.get("value")
+                if isinstance(value, list):
+                    for v in value:
+                        if isinstance(v, str):
+                            result = v
+                            for key, val in subs.items():
+                                result = result.replace(f"${{{key}}}", val)
+                            jvm_args.append(result)
+                        else:
+                            jvm_args.append(str(v))
+                elif isinstance(value, str):
+                    result = value
+                    for key, val in subs.items():
+                        result = result.replace(f"${{{key}}}", val)
+                    jvm_args.append(result)
+
+    # Add memory args (Mojang doesn't provide these - launcher handles them)
+    jvm_args.append(f"-Xmx{max_memory}")
+    jvm_args.append(f"-Xms{min_memory}")
+
+    return jvm_args
+
+
+def parse_game_arguments(version_json, version, game_dir, assets_dir, asset_index, username, uuid, access_token, client_id=None, xuid=None, version_type="release", is_demo=False, width=None, height=None):
+    """
+    Parse game arguments from version JSON and substitute placeholders.
+    """
+    game_args = []
+
+    arguments = version_json.get("arguments", {})
+    game_arguments = arguments.get("game", [])
+
+    subs = {
+        "auth_player_name": username,
+        "version_name": version,
+        "game_directory": game_dir,
+        "assets_root": assets_dir,
+        "assets_index_name": asset_index,
+        "auth_uuid": uuid,
+        "auth_access_token": access_token,
+        "clientid": client_id or "",
+        "auth_xuid": xuid or "",
+        "version_type": version_type,
+        "resolution_width": str(width) if width else "0",
+        "resolution_height": str(height) if height else "0",
+    }
+
+    for arg in game_arguments:
+        if isinstance(arg, str):
+            # Substitute placeholders
+            result = arg
+            for key, value in subs.items():
+                result = result.replace(f"${{{key}}}", value)
+            # Only add if substitution worked (not a literal placeholder that wasn't replaced)
+            if "${" not in result:
+                # Split by spaces to get individual arguments
+                for part in result.split():
+                    if part.strip():
+                        game_args.append(part)
+        elif isinstance(arg, dict):
+            # Has rules - check if we should include it
+            if check_rules(arg.get("rules", [])):
+                value = arg.get("value")
+                if isinstance(value, list):
+                    for v in value:
+                        if isinstance(v, str):
+                            result = v
+                            for key, val in subs.items():
+                                result = result.replace(f"${{{key}}}", val)
+                            if "${" not in result:
+                                # Split by spaces to get individual arguments
+                                for part in result.split():
+                                    if part.strip():
+                                        game_args.append(part)
+                        else:
+                            game_args.append(str(v))
+                elif isinstance(value, str):
+                    result = value
+                    for key, val in subs.items():
+                        result = result.replace(f"${{{key}}}", val)
+                    if "${" not in result:
+                        # Split by spaces to get individual arguments
+                        for part in result.split():
+                            if part.strip():
+                                game_args.append(part)
+
+    return game_args
 
 
 # ---------------- NATIVES ----------------
@@ -192,6 +362,19 @@ def download_game(version, workers=30):
     else:
         print("Client jar already exists, skipping")
 
+    # ---------------- LOGGING CONFIG ----------------
+    logging_config_path = None
+    if "logging" in version_json and "client" in version_json["logging"]:
+        logging_info = version_json["logging"]["client"]
+        if "file" in logging_info:
+            logging_file = logging_info["file"]
+            logging_url = logging_file["url"]
+            logging_config_path = version_dir / logging_file["id"]
+            if safe_download(session, logging_url, logging_config_path):
+                print(f"Downloaded logging config: {logging_file['id']}")
+            else:
+                print("Logging config already exists, skipping")
+
     # ---------------- LIBRARIES ----------------
     print("Downloading libraries...")
     classpath = []
@@ -242,6 +425,8 @@ def download_game(version, workers=30):
         "assets_dir": str(assets_dir),
         "version_dir": str(version_dir),
         "java_path": final_java_path,
+        "game_dir": "minecraft",
+        "logging_config_path": str(logging_config_path) if logging_config_path else None,
     }
 
 
@@ -294,7 +479,7 @@ def verify_version(version):
     return False
 
 # ---------------- START MINECRAFT ----------------
-def start_minecraft(info, version, username="Player", auth: MCMSA|None = None, profile:None|dict=None, minecraft_access_token:None|str=None): # type: ignore
+def start_minecraft(info, version, username="Player", auth: MCMSA|None = None, profile:None|dict=None, minecraft_access_token:None|str=None, client_id: str | None = None, xuid: str | None = None): # type: ignore
     version_json = info["version_json"]
     classpath = info["classpath"]
     natives_dir = info["natives_dir"]
@@ -309,24 +494,10 @@ def start_minecraft(info, version, username="Player", auth: MCMSA|None = None, p
     # asset index is usually inside version json
     asset_index = version_json.get("assetIndex", {}).get("id", version)
 
-    sep = ";" if platform.system().lower() == "windows" else ":"
-    cp = sep.join(classpath)
+    # Determine auth values first (needed for both old and new argument formats)
+    is_microsoft = auth or (minecraft_access_token and profile)
 
-    cmd = [
-        info["java_path"],
-        f"-Djava.library.path={natives_dir}",
-        "-Xmx2G",
-        "-Xms1G",
-        "-cp",
-        cp,
-        main_class,
-        "--version", version,
-        "--gameDir", game_dir,
-        "--assetsDir", assets_dir,
-        "--assetIndex", asset_index,
-    ]
-
-    if auth or (minecraft_access_token and profile):
+    if is_microsoft:
         should_reauth = False
 
         if auth:
@@ -351,22 +522,83 @@ def start_minecraft(info, version, username="Player", auth: MCMSA|None = None, p
                 if not minecraft_access_token or not profile:
                     print("Authentication failed. To not use Microsoft change use_microsoft_account in config.properties to False.")
                     return
-            
+
         assert profile is not None
         assert minecraft_access_token is not None
 
         print(f"Hello {profile['name']}! You logged in with Microsoft.")
-        cmd.extend([
-            "--uuid", profile["id"],
-            "--accessToken", minecraft_access_token,
-            "--username", profile["name"]
-        ])
-
+        auth_username = profile["name"]
+        auth_uuid = profile["id"]
+        auth_access_token = minecraft_access_token
     else:
+        auth_username = username
+        auth_uuid = "00000000-0000-0000-0000-000000000000"
+        auth_access_token = "0"
+
+    # Check if version supports new argument format
+    has_arguments = "arguments" in version_json
+
+    # Get memory settings from config (with defaults)
+    max_memory = config.get("max_memory", "2G")
+    min_memory = config.get("min_memory", "1G")
+
+    # Get logging config path from info
+    logging_config_path = info.get("logging_config_path")
+
+    # Parse JVM arguments from Mojang or use fallback
+    if has_arguments:
+        jvm_args = parse_jvm_arguments(
+            version_json,
+            natives_dir,
+            classpath,
+            game_dir,
+            assets_dir,
+            asset_index,
+            max_memory=max_memory,
+            min_memory=min_memory,
+            logging_config_path=logging_config_path
+        )
+    else:
+        # Fallback for older versions without arguments field
+        sep = ";" if platform.system().lower() == "windows" else ":"
+        cp = sep.join(classpath)
+        jvm_args = [
+            f"-Djava.library.path={natives_dir}",
+            f"-Xmx{max_memory}",
+            f"-Xms{min_memory}",
+            "-cp",
+            cp,
+        ]
+
+    # Build the command
+    cmd = [info["java_path"]] + jvm_args + [main_class]
+
+    # Parse game arguments if available, otherwise use legacy format
+    if has_arguments:
+        game_args = parse_game_arguments(
+            version_json,
+            version,
+            game_dir,
+            assets_dir,
+            asset_index,
+            auth_username,
+            auth_uuid,
+            auth_access_token,
+            client_id,
+            xuid,
+            version_type=version_json.get("type", "release")
+        )
+        cmd.extend(game_args)
+    else:
+        # Legacy format for older versions
         cmd.extend([
-            "--uuid", "00000000-0000-0000-0000-000000000000",
-            "--accessToken", "0",
-            "--username", username
+            "--version", version,
+            "--gameDir", game_dir,
+            "--assetsDir", assets_dir,
+            "--assetIndex", asset_index,
+            "--uuid", auth_uuid,
+            "--accessToken", auth_access_token,
+            "--username", auth_username
         ])
 
     print("\nLaunching Minecraft...\n")
