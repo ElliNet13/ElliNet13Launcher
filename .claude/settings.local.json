@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:launchermeta.mojang.com)",
+      "WebFetch(domain:piston-meta.mojang.com)",
+      "Bash(/.venv/Scripts/python.exe -m py_compile launcher.py)",
+      "Bash(./.venv/Scripts/python.exe -m py_compile launcher.py)"
+    ]
+  }
+}
