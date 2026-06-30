@@ -336,7 +336,6 @@ def start_minecraft(info, version, username="Player", java_path="java", auth: MC
 
         print(f"Hello {profile['name']}! You logged in with Microsoft.")
         cmd.extend([
-            "--userType", "msa",
             "--uuid", profile["id"],
             "--accessToken", minecraft_access_token,
             "--username", profile["name"]
@@ -344,7 +343,6 @@ def start_minecraft(info, version, username="Player", java_path="java", auth: MC
 
     else:
         cmd.extend([
-            "--userType", "legacy",
             "--uuid", "00000000-0000-0000-0000-000000000000",
             "--accessToken", "0",
             "--username", username
@@ -352,7 +350,7 @@ def start_minecraft(info, version, username="Player", java_path="java", auth: MC
 
     print("\nLaunching Minecraft...\n")
 
-    subprocess.run(cmd)
+    subprocess.run(cmd, check=True)
 
 
 # ---------------- GUI ----------------
@@ -447,10 +445,18 @@ def launch_from_gui(versionString: ctk.StringVar, app: ctk.CTk, container: ctk.C
             minecraft_access_token = result[0]
             profile = result[1]
         
-        ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}..."))
+        ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}... (Microsoft account)"))
         time.sleep(1)
-        ui(lambda: exit_gui(app))
+        ui(lambda: app.withdraw())
         start_minecraft(info, version=version, java_path=config["java_path"], minecraft_access_token=minecraft_access_token, profile=profile)
+        ui(lambda: exit_gui(app))
+        return
+        
+    ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}... (Offline account)"))
+    time.sleep(1)
+    ui(lambda: app.withdraw())
+    start_minecraft(info, version=version, java_path=config["java_path"], username=config["username"])
+    ui(lambda: exit_gui(app))
 
 def copy_to_clipboard(text: str, app: ctk.CTk):
     app.clipboard_clear()
