@@ -1,6 +1,7 @@
 import argparse
 from libs.pack_downloader import *
 
+import threading
 import zipfile
 import os
 from pathlib import Path
@@ -296,9 +297,68 @@ def extract_natives(lib, lib_path, natives_dir):
                     f.write(jar.read(file))
 
 
+# ---------------- FABRIC ----------------
+
+def get_fabric_loader_version(minecraft_version: str):
+    """Get the latest Fabric loader version compatible with a Minecraft version."""
+    url = f"https://meta.fabricmc.net/v2/versions/loader/{minecraft_version}"
+    r = session.get(url)
+    r.raise_for_status()
+    versions = r.json()
+
+    if not versions:
+        raise ValueError(f"No Fabric version found for Minecraft {minecraft_version}")
+
+    # First entry is the latest stable version
+    latest = versions[0]
+    return latest["loader"]["version"], latest["launcherMeta"]["mainClass"]["client"], latest["launcherMeta"]["libraries"]
+
+def download_fabric_loader(minecraft_version: str, base_dir: Path, libraries_dir: Path, version_dir: Path):
+    """Download Fabric loader and installer JARs."""
+    loader_ver, fabric_main_class, launcher_libs = get_fabric_loader_version(minecraft_version)
+
+    print(f"Downloading Fabric loader {loader_ver} for Minecraft {minecraft_version}...")
+
+    # Download Fabric loader JAR from Maven
+    fabric_url = f"https://maven.fabricmc.net/net/fabricmc/fabric-loader/{loader_ver}/fabric-loader-{loader_ver}.jar"
+    fabric_jar_path = version_dir / "fabric-loader.jar"
+    if not fabric_jar_path.exists():
+        r = session.get(fabric_url)
+        r.raise_for_status()
+        fabric_jar_path.write_bytes(r.content)
+        print(f"Downloaded Fabric loader JAR")
+
+    # Download required libraries from launcher metadata
+    all_libs = launcher_libs.get("client", []) + launcher_libs.get("common", []) + launcher_libs.get("server", [])
+    fabric_lib_paths = []
+    for lib in all_libs:
+        lib_name = lib["name"]
+        # Convert maven name to path: net.fabricmc:fabric-loader:0.19.3 -> net/fabricmc/fabric-loader/0.19.3/fabric-loader-0.19.3.jar
+        parts = lib_name.split(":")
+        if len(parts) >= 3:
+            group_path = parts[0].replace(".", "/")
+            artifact = parts[1]
+            version = parts[2]
+            lib_filename = f"{artifact}-{version}.jar"
+            # Use string concatenation to avoid Path URL encoding issues
+            lib_path_str = f"{group_path}/{artifact}/{version}/{lib_filename}"
+
+            lib_url = f"https://maven.fabricmc.net/{lib_path_str}"
+            lib_dest = libraries_dir / lib_path_str
+            fabric_lib_paths.append(str(lib_dest))
+
+            if not lib_dest.exists():
+                r = session.get(lib_url)
+                r.raise_for_status()
+                lib_dest.parent.mkdir(parents=True, exist_ok=True)
+                lib_dest.write_bytes(r.content)
+                print(f"Downloaded Fabric lib: {lib_name}")
+
+    return str(fabric_jar_path), loader_ver, fabric_main_class, fabric_lib_paths
+
 # ---------------- DOWNLOAD GAME ----------------
 
-def download_game(version, workers=30):
+def download_game(version, workers=30, use_fabric=False):
     base_dir = Path("minecraft_runtime")
     version_dir = base_dir / "versions" / version
     libraries_dir = base_dir / "libraries"
@@ -325,6 +385,17 @@ def download_game(version, workers=30):
 
     print("Downloading version JSON...")
     version_json = grab_version_json(version_info)
+
+    # Download Fabric if enabled
+    fabric_loader_path = None
+    fabric_loader_version = None
+    fabric_main_class = None
+    fabric_lib_paths = []
+    if use_fabric:
+        fabric_loader_path, fabric_loader_version, fabric_main_class, fabric_lib_paths = download_fabric_loader(
+            version, base_dir, libraries_dir, version_dir
+        )
+        print(f"Fabric {fabric_loader_version} downloaded for {version}")
 
     # ---------------- ASSETS ----------------
     print("Downloading assets...")
@@ -427,6 +498,11 @@ def download_game(version, workers=30):
         "java_path": final_java_path,
         "game_dir": "minecraft",
         "logging_config_path": str(logging_config_path) if logging_config_path else None,
+        "fabric_loader_path": fabric_loader_path,
+        "fabric_loader_version": fabric_loader_version,
+        "fabric_main_class": fabric_main_class,
+        "fabric_lib_paths": fabric_lib_paths,
+        "use_fabric": use_fabric,
     }
 
 
@@ -479,7 +555,7 @@ def verify_version(version):
     return False
 
 # ---------------- START MINECRAFT ----------------
-def start_minecraft(info, version, username="Player", auth: MCMSA|None = None, profile:None|dict=None, minecraft_access_token:None|str=None, client_id: str | None = None, xuid: str | None = None): # type: ignore
+def start_minecraft(info, version, username="Player", auth: MCMSA|None = None, profile:None|dict=None, minecraft_access_token:None|str=None, client_id: str | None = None, xuid: str | None = None, use_fabric: bool = None): # type: ignore
     version_json = info["version_json"]
     classpath = info["classpath"]
     natives_dir = info["natives_dir"]
@@ -487,7 +563,19 @@ def start_minecraft(info, version, username="Player", auth: MCMSA|None = None, p
     game_dir = info.get("game_dir", "minecraft")
     assets_dir = info.get("assets_dir", "assets")
 
-    main_class = version_json.get("mainClass")
+    # Determine if we should use Fabric
+    if use_fabric is None:
+        use_fabric = info.get("use_fabric", False)
+
+    # Use Fabric's main class if enabled
+    if use_fabric and info.get("fabric_loader_path"):
+        main_class = info.get("fabric_main_class", "net.fabricmc.loader.launch.knot.KnotClient")
+        # Add Fabric loader and its libraries to classpath
+        fabric_libs = info.get("fabric_lib_paths", [])
+        classpath = classpath + fabric_libs + [info["fabric_loader_path"]]
+    else:
+        main_class = version_json.get("mainClass")
+
     if not main_class:
         raise ValueError("Missing mainClass")
 
@@ -653,6 +741,21 @@ def start_gui():
 
     versionEntry.pack()
 
+    # ---------------- FABRIC TOGGLE ----------------
+    fabric_enabled = ctk.BooleanVar(value=config.get("use_fabric", "false").lower() == "true")
+
+    def toggle_fabric():
+        config["use_fabric"] = str(fabric_enabled.get()).lower()
+        save_config()
+
+    fabric_checkbox = ctk.CTkCheckBox(
+        container,
+        text="Enable Fabric",
+        variable=fabric_enabled,
+        command=toggle_fabric
+    )
+    fabric_checkbox.pack(pady=(10, 5))
+
     # ---------------- LAST VERSIONS LIST ----------------
     historyLabel = ctk.CTkLabel(container, text="Last Versions")
     historyLabel.pack(pady=(10, 5))
@@ -679,7 +782,7 @@ def start_gui():
         text="Play",
         command=lambda: threading.Thread(
             target=launch_from_gui,
-            args=(version, app, container, mainLabel, container),
+            args=(version, fabric_enabled, app, container, mainLabel, container),
             daemon=True
         ).start()
     )
@@ -707,11 +810,12 @@ def start_gui():
 
     app.mainloop()
 
-def launch_from_gui(versionString: ctk.StringVar, app: ctk.CTk, container: ctk.CTkFrame, mainLabel: ctk.CTkLabel, dcontainer: ctk.CTkFrame):
+def launch_from_gui(versionString: ctk.StringVar, fabricEnabled: ctk.BooleanVar, app: ctk.CTk, container: ctk.CTkFrame, mainLabel: ctk.CTkLabel, dcontainer: ctk.CTkFrame):
     def ui(fn):
         app.after(0, fn)
 
     version = versionString.get()
+    use_fabric = fabricEnabled.get()
 
     ui(lambda: dcontainer.destroy())
     ui(lambda: mainLabel.configure(text=f"Loading data for Minecraft version {version}..."))
@@ -732,7 +836,7 @@ def launch_from_gui(versionString: ctk.StringVar, app: ctk.CTk, container: ctk.C
     config["last_versions_list"] = save_list(versions)
 
     ui(lambda: mainLabel.configure(text=f"Downloading Minecraft version {version}..."))
-    info = download_game(version)
+    info = download_game(version, use_fabric=use_fabric)
 
     ui(lambda: mainLabel.configure(text="Checking Microsoft authentication..."))
 
@@ -768,14 +872,14 @@ def launch_from_gui(versionString: ctk.StringVar, app: ctk.CTk, container: ctk.C
         ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}... (Microsoft account)"))
         time.sleep(1)
         ui(lambda: app.withdraw())
-        start_minecraft(info, version=version, minecraft_access_token=minecraft_access_token, profile=profile)
+        start_minecraft(info, version=version, minecraft_access_token=minecraft_access_token, profile=profile, use_fabric=use_fabric)
         ui(lambda: exit_gui(app))
         return
-        
+
     ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}... (Offline account)"))
     time.sleep(1)
     ui(lambda: app.withdraw())
-    start_minecraft(info, version=version, username=config["username"])
+    start_minecraft(info, version=version, username=config["username"], use_fabric=use_fabric)
     ui(lambda: exit_gui(app))
 
 def copy_to_clipboard(text: str, app: ctk.CTk):
@@ -848,25 +952,37 @@ if __name__ == "__main__":
     parser.add_argument("-v", "--version", type=str, required=False)
     parser.add_argument("-w", "--workers", type=int, default=30)
     parser.add_argument("--dont-run", action="store_false", dest="run")
+    parser.add_argument("--fabric", action="store_true", dest="use_fabric")
+    parser.add_argument("--no-fabric", action="store_false", dest="use_fabric")
+    parser.add_argument("--fabric-set", type=str, dest="fabric_state", choices=["true", "false"], help="Set and save fabric state in config")
 
     args = parser.parse_args()
+
+    # Handle --fabric-set to save preference in config
+    if args.fabric_state:
+        config["use_fabric"] = args.fabric_state
+        save_config()
+        print(f"Fabric preference saved: use_fabric={args.fabric_state}")
 
     try:
         if args.version is None:
             start_gui()
             sys.exit(0)
 
+        # Determine fabric usage: CLI arg takes precedence, otherwise use config
+        use_fabric = args.use_fabric if args.use_fabric is not None else (config.get("use_fabric", "false").lower() == "true")
+
         if not verify_version(args.version):
             raise ValueError(f"Minecraft version {args.version} not found.")
-        
-        info = download_game(args.version, workers=args.workers)
+
+        info = download_game(args.version, workers=args.workers, use_fabric=use_fabric)
 
         if args.run:
             if config["use_microsoft_account"].lower() == "true":
                 mcmsa = MCMSA()
             else:
                 mcmsa = None
-            start_minecraft(info, username=config["username"], version=args.version, auth=mcmsa)
+            start_minecraft(info, username=config["username"], version=args.version, auth=mcmsa, use_fabric=use_fabric)
     except KeyboardInterrupt:
         print("\nInterrupted by user. Stopping...")
         sys.exit(1)

@@ -224,3 +224,6 @@ logs/
 
 # Launcher files
 config.properties
+
+# Other files
+*.local.*
