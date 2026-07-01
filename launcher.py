@@ -1001,7 +1001,7 @@ def start_gui():
         # Scrape button
         def scrape_and_refresh():
             scrape_omniarchive_index()
-            refresh_versions()
+            refresh_eras()
 
         scrape_button = ctk.CTkButton(
             browser_container,
@@ -1010,22 +1010,77 @@ def start_gui():
         )
         scrape_button.pack(pady=5)
 
-        # Scrollable frame for versions
-        versions_scroll = ctk.CTkScrollableFrame(browser_container, width=550, height=350)
-        versions_scroll.pack(pady=5, fill="both", expand=True)
+        # Create a horizontal paned container for eras and versions
+        paned_container = ctk.CTkFrame(browser_container)
+        paned_container.pack(pady=5, fill="both", expand=True)
 
-        def refresh_versions():
+        # Left side - Era list
+        eras_frame = ctk.CTkFrame(paned_container)
+        eras_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
+
+        ctk.CTkLabel(eras_frame, text="Eras").pack(pady=5)
+
+        eras_scroll = ctk.CTkScrollableFrame(eras_frame, width=200, height=300)
+        eras_scroll.pack(fill="both", expand=True, padx=5)
+
+        # Right side - Version list
+        versions_frame = ctk.CTkFrame(paned_container)
+        versions_frame.pack(side="right", fill="both", expand=True, padx=(5, 0))
+
+        ctk.CTkLabel(versions_frame, text="Versions").pack(pady=5)
+
+        versions_scroll = ctk.CTkScrollableFrame(versions_frame, width=350, height=300)
+        versions_scroll.pack(fill="both", expand=True, padx=5)
+
+        def refresh_eras():
             # Clear existing buttons
+            for widget in eras_scroll.winfo_children():
+                widget.destroy()
+
+            index = load_omniarchive_index()
+
+            if not index:
+                ctk.CTkLabel(eras_scroll, text="No index found. Click 'Refresh Index' to scrape.").pack(pady=20)
+                return
+
+            # Get eras in order
+            eras = list(index.keys())
+
+            for era in eras:
+                era_btn = ctk.CTkButton(
+                    eras_scroll,
+                    text=era,
+                    height=28,
+                    command=lambda e=era: select_era(e)
+                )
+                era_btn.pack(fill="x", pady=2, padx=5)
+
+            # Select first era by default if any exist
+            if eras:
+                select_era(eras[0])
+
+        def select_era(era_name):
+            # Clear existing buttons in versions
             for widget in versions_scroll.winfo_children():
                 widget.destroy()
 
-            omni_versions = get_all_omniarchive_versions()
-
-            if not omni_versions:
-                ctk.CTkLabel(versions_scroll, text="No versions found. Click 'Refresh Index' to scrape.").pack(pady=20)
+            index = load_omniarchive_index()
+            if not index or era_name not in index:
                 return
 
-            for v in omni_versions:
+            era_versions = index[era_name]
+
+            # Sort versions for this era
+            def version_sort_key(v):
+                parts = v.replace("-snapshot", "").replace("-pre", "").replace("-rc", "").replace("-beta", "").replace("-alpha", "").split(".")
+                try:
+                    return [int(p) if p.isdigit() else 0 for p in parts] + [0, 0]
+                except:
+                    return [0, 0, 0]
+
+            sorted_versions = sorted(era_versions.keys(), key=version_sort_key, reverse=True)
+
+            for v in sorted_versions:
                 btn = ctk.CTkButton(
                     versions_scroll,
                     text=v,
@@ -1034,7 +1089,7 @@ def start_gui():
                 )
                 btn.pack(fill="x", pady=2, padx=5)
 
-        refresh_versions()
+        refresh_eras()
 
         # Close button
         ctk.CTkButton(browser_container, text="Close", command=browser_app.destroy).pack(pady=10)
