@@ -225,6 +225,7 @@ level.dat
 
 # Launcher files
 config.properties
+omniarchive.json
 
 # Other files
 *.local.*

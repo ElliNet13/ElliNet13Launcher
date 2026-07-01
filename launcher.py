@@ -1,5 +1,6 @@
 import argparse
 from libs.pack_downloader import *
+from libs import omniarchive as omniarchive_lib
 
 import threading
 import zipfile
@@ -42,6 +43,69 @@ def save_list(arr: list) -> str:
 
 def load_list(arr: str) -> list:
     return json.loads(zlib.decompress(arr.encode("latin-1")).decode("utf-8"))
+
+# ---------------- OMNIARCHIVE ----------------
+OMNIARCHIVE_INDEX_FILE = "omniarchive.json"
+
+def load_omniarchive_index():
+    """Load the local Omniarchive index if it exists."""
+    if os.path.exists(OMNIARCHIVE_INDEX_FILE):
+        with open(OMNIARCHIVE_INDEX_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+def scrape_omniarchive_index():
+    """Scrape the Omniarchive index and save it locally."""
+    print("Scraping Omniarchive index...")
+    omniarchive_lib.scrape_omniarchive()
+    return load_omniarchive_index()
+
+def find_omniarchive_version(version: str):
+    """
+    Try to find a version in Omniarchive.
+    Returns the download URL if found, None otherwise.
+    """
+    index = load_omniarchive_index()
+    if not index:
+        return None
+
+    # First try exact match
+    for era, versions in index.items():
+        if version in versions:
+            return versions[version]
+
+    # Try case-insensitive match
+    version_lower = version.lower()
+    for era, versions in index.items():
+        for v in versions:
+            if v.lower() == version_lower:
+                return versions[v]
+
+    return None
+
+def get_all_omniarchive_versions():
+    """Get a sorted list of all versions available in Omniarchive."""
+    index = load_omniarchive_index()
+    if not index:
+        return []
+
+    all_versions = []
+    for era, versions in index.items():
+        for v in versions:
+            if v not in all_versions:
+                all_versions.append(v)
+
+    # Sort versions (newest first)
+    def version_sort_key(v):
+        # Extract version numbers for proper sorting
+        parts = v.replace("-snapshot", "").replace("-pre", "").replace("-rc", "").replace("-beta", "").replace("-alpha", "").split(".")
+        try:
+            return [int(p) if p.isdigit() else 0 for p in parts] + [0, 0]
+        except:
+            return [0, 0, 0]
+
+    all_versions.sort(key=version_sort_key, reverse=True)
+    return all_versions
 
 # ---------------- CACHE HELPERS ----------------
 
@@ -418,7 +482,7 @@ def download_fabric_loader(minecraft_version: str, base_dir: Path, libraries_dir
 
 # ---------------- DOWNLOAD GAME ----------------
 
-def download_game(version, workers=30, use_fabric=False):
+def download_game(version, workers=30, use_fabric=False, use_omniarchive=False):
     base_dir = Path("minecraft_runtime")
     version_dir = base_dir / "versions" / version
     libraries_dir = base_dir / "libraries"
@@ -432,6 +496,10 @@ def download_game(version, workers=30, use_fabric=False):
     java_runtime_dir.mkdir(parents=True, exist_ok=True)
     natives_dir.mkdir(parents=True, exist_ok=True)
 
+    # Check for Omniarchive version
+    omniarchive_jar_url = None
+    version_info = None
+
     print("Downloading manifest...")
     manifest = grab_minecraft_manifest()
 
@@ -441,7 +509,35 @@ def download_game(version, workers=30, use_fabric=False):
     )
 
     if not version_info:
-        raise ValueError(f"Version {version} not found")
+        # Try Omniarchive if not in official manifest
+        if use_omniarchive:
+            omniarchive_jar_url = find_omniarchive_version(version)
+            if omniarchive_jar_url:
+                print(f"Version {version} not in official manifest, using Omniarchive...")
+                # For Omniarchive, we need to find a nearby version for libraries/assets
+                # Find the closest version from official manifest
+                all_versions = [v["id"] for v in manifest["versions"]]
+                closest_version = None
+                for v in reversed(all_versions):
+                    # Try to find a version that might have the same assets
+                    if v < version:
+                        closest_version = v
+                        break
+                if not closest_version:
+                    closest_version = manifest["latest"]["release"]
+
+                # Get version JSON from closest version
+                version_info = next(
+                    (v for v in manifest["versions"] if v["id"] == closest_version),
+                    None
+                )
+                if not version_info:
+                    raise ValueError(f"Could not find closest version for {version}")
+                print(f"Using {closest_version} as base for libraries and assets...")
+            else:
+                raise ValueError(f"Version {version} not found")
+        else:
+            raise ValueError(f"Version {version} not found")
 
     print("Downloading version JSON...")
     version_json = grab_version_json(version_info)
@@ -487,7 +583,13 @@ def download_game(version, workers=30, use_fabric=False):
 
     # ---------------- CLIENT JAR ----------------
     print("Checking client jar...")
-    jar_url = version_json["downloads"]["client"]["url"]
+
+    # Use Omniarchive URL if available, otherwise use official
+    if omniarchive_jar_url:
+        jar_url = omniarchive_jar_url
+        print(f"Using Omniarchive JAR: {jar_url}")
+    else:
+        jar_url = version_json["downloads"]["client"]["url"]
 
     jar_path = version_dir / f"{version}.jar"
 
@@ -571,6 +673,7 @@ def download_game(version, workers=30, use_fabric=False):
         "fabric_main_class": fabric_main_class,
         "fabric_lib_paths": fabric_lib_paths,
         "use_fabric": use_fabric,
+        "use_omniarchive": use_omniarchive,
     }
 
 
@@ -611,13 +714,20 @@ def auth_microsoft(auth: MCMSA) -> Tuple[Optional[str], Optional[str]]:
             
 
 # ---------------- VERIFY ----------------
-def verify_version(version):
+def verify_version(version, use_omniarchive=False):
+    # Always check official manifest first
     manifest = grab_minecraft_manifest()
 
     versions = manifest.get("versions", [])
 
     for v in versions:
         if v.get("id") == version:
+            return True
+
+    # If not found and omniarchive is enabled, check Omniarchive
+    if use_omniarchive:
+        omni_url = find_omniarchive_version(version)
+        if omni_url:
             return True
 
     return False
@@ -773,7 +883,7 @@ def start_minecraft(info, version, username="Player", auth: MCMSA|None = None, p
 # ---------------- GUI ----------------
 
 def exit_gui(app: ctk.CTk):
-    config["geometry"] = f"{app.winfo_width()}x{app.winfo_height()}+{app.winfo_x()}+{app.winfo_y()}"
+    config["geometry"] = f"{app.winfo_x()}+{app.winfo_y()}"
     save_config()
     app.destroy()
 
@@ -786,7 +896,7 @@ def start_gui():
 
     app = ctk.CTk()
     app.title("ElliNet13 Launcher")
-    app.geometry(config.get("geometry", "800x600"))
+    app.geometry(f"800x700+{config.get('geometry', '100+100')}")
     app.protocol("WM_DELETE_WINDOW", lambda: exit_gui(app))
     app.resizable(False, False)
 
@@ -838,6 +948,105 @@ def start_gui():
     )
     fabric_checkbox.pack(pady=(10, 5))
 
+    # ---------------- OMNIARCHIVE TOGGLE ----------------
+    omniarchive_enabled = ctk.BooleanVar(value=config.get("use_omniarchive", "false").lower() == "true")
+
+    def toggle_omniarchive():
+        config["use_omniarchive"] = str(omniarchive_enabled.get()).lower()
+        save_config()
+        if omniarchive_enabled.get():
+            omniarchive_browser_button.pack(pady=5, after=omniarchive_checkbox)
+        else:
+            omniarchive_browser_button.pack_forget()
+        
+
+    omniarchive_checkbox = ctk.CTkCheckBox(
+        container,
+        text="Enable Omniarchive",
+        variable=omniarchive_enabled,
+        command=toggle_omniarchive
+    )
+    omniarchive_checkbox.pack(pady=(10, 5))
+
+    # ---------------- OMNIARCHIVE BROWSER BUTTON ----------------
+    def open_omniarchive_browser():
+        browser_app = ctk.CTkToplevel(app)
+        browser_app.title("Omniarchive Browser")
+
+        # Make sure window sizes are up to date
+        app.update_idletasks()
+
+        # Get parent window position and size
+        parent_x = app.winfo_x()
+        parent_y = app.winfo_y()
+        parent_w = app.winfo_width()
+        parent_h = app.winfo_height()
+
+        # Calculate center position
+        width = 600
+        height = 500
+        x = parent_x + (parent_w // 2) - (width // 2)
+        y = parent_y + (parent_h // 2) - (height // 2)
+
+        browser_app.geometry(f"{width}x{height}+{x}+{y}")
+        browser_app.transient(app)
+        browser_app.lift()
+
+        browser_container = ctk.CTkFrame(browser_app, fg_color="transparent")
+        browser_container.pack(expand=True, fill="both", padx=10, pady=10)
+
+        # Title
+        ctk.CTkLabel(browser_container, text="Omniarchive Versions", font=("", 16)).pack(pady=10)
+
+        # Scrape button
+        def scrape_and_refresh():
+            scrape_omniarchive_index()
+            refresh_versions()
+
+        scrape_button = ctk.CTkButton(
+            browser_container,
+            text="Refresh Index (Scrape)",
+            command=lambda: threading.Thread(target=scrape_and_refresh, daemon=True).start()
+        )
+        scrape_button.pack(pady=5)
+
+        # Scrollable frame for versions
+        versions_scroll = ctk.CTkScrollableFrame(browser_container, width=550, height=350)
+        versions_scroll.pack(pady=5, fill="both", expand=True)
+
+        def refresh_versions():
+            # Clear existing buttons
+            for widget in versions_scroll.winfo_children():
+                widget.destroy()
+
+            omni_versions = get_all_omniarchive_versions()
+
+            if not omni_versions:
+                ctk.CTkLabel(versions_scroll, text="No versions found. Click 'Refresh Index' to scrape.").pack(pady=20)
+                return
+
+            for v in omni_versions:
+                btn = ctk.CTkButton(
+                    versions_scroll,
+                    text=v,
+                    height=28,
+                    command=lambda val=v: (version.set(val), browser_app.destroy())
+                )
+                btn.pack(fill="x", pady=2, padx=5)
+
+        refresh_versions()
+
+        # Close button
+        ctk.CTkButton(browser_container, text="Close", command=browser_app.destroy).pack(pady=10)
+
+    omniarchive_browser_button = ctk.CTkButton(
+        container,
+        text="Browse Omniarchive",
+        command=open_omniarchive_browser
+    )
+    if omniarchive_enabled.get():
+        omniarchive_browser_button.pack(pady=5, after=omniarchive_checkbox)
+
     # ---------------- LAST VERSIONS LIST ----------------
     historyLabel = ctk.CTkLabel(container, text="Last Versions")
     historyLabel.pack(pady=(10, 5))
@@ -864,7 +1073,7 @@ def start_gui():
         text="Play",
         command=lambda: threading.Thread(
             target=launch_from_gui,
-            args=(version, fabric_enabled, app, maincontainer, mainLabel, gameDir, container),
+            args=(version, fabric_enabled, omniarchive_enabled, app, maincontainer, mainLabel, gameDir, container),
             daemon=True
         ).start()
     )
@@ -892,13 +1101,14 @@ def start_gui():
 
     app.mainloop()
 
-def launch_from_gui(versionString: ctk.StringVar, fabricEnabled: ctk.BooleanVar, app: ctk.CTk, container: ctk.CTkFrame, mainLabel: ctk.CTkLabel, gameDir: ctk.StringVar, dcontainer: ctk.CTkFrame):
+def launch_from_gui(versionString: ctk.StringVar, fabricEnabled: ctk.BooleanVar, omniarchiveEnabled: ctk.BooleanVar, app: ctk.CTk, container: ctk.CTkFrame, mainLabel: ctk.CTkLabel, gameDir: ctk.StringVar, dcontainer: ctk.CTkFrame):
     def ui(fn):
         app.after(0, fn)
 
     try:
         version = versionString.get()
         use_fabric = fabricEnabled.get()
+        use_omniarchive = omniarchiveEnabled.get()
         game_directory = gameDir.get()
 
         ui(lambda: dcontainer.destroy())
@@ -907,7 +1117,12 @@ def launch_from_gui(versionString: ctk.StringVar, fabricEnabled: ctk.BooleanVar,
         config["dot_minecraft_dir"] = game_directory
         save_config()
 
-        if not verify_version(version):
+        # If omniarchive is enabled but index doesn't exist, scrape it
+        if use_omniarchive and not load_omniarchive_index():
+            ui(lambda: mainLabel.configure(text="Scraping Omniarchive index..."))
+            scrape_omniarchive_index()
+
+        if not verify_version(version, use_omniarchive=use_omniarchive):
             raise UserError(f"Version {version} not found.")
 
         versions = load_list(config.get("last_versions_list", "")) or []
@@ -921,7 +1136,7 @@ def launch_from_gui(versionString: ctk.StringVar, fabricEnabled: ctk.BooleanVar,
         config["last_versions_list"] = save_list(versions)
 
         ui(lambda: mainLabel.configure(text=f"Downloading Minecraft version {version}..."))
-        info = download_game(version, use_fabric=use_fabric)
+        info = download_game(version, use_fabric=use_fabric, use_omniarchive=use_omniarchive)
 
         ui(lambda: mainLabel.configure(text="Checking Microsoft authentication..."))
 
@@ -1043,6 +1258,10 @@ if __name__ == "__main__":
     parser.add_argument("--no-fabric", action="store_false", dest="use_fabric")
     parser.add_argument("--fabric-set", type=str, dest="fabric_state", choices=["true", "false"], help="Set and save fabric state in config")
     parser.add_argument("--data-dir", type=str, dest="data_dir", help="Set .minecraft directory")
+    parser.add_argument("--omniarchive", action="store_true", dest="use_omniarchive")
+    parser.add_argument("--no-omniarchive", action="store_false", dest="use_omniarchive")
+    parser.add_argument("--omniarchive-set", type=str, dest="omniarchive_state", choices=["true", "false"], help="Set and save omniarchive state in config")
+    parser.add_argument("--scrape-omniarchive", action="store_true", help="Scrape the Omniarchive index")
 
     args = parser.parse_args()
 
@@ -1054,18 +1273,37 @@ if __name__ == "__main__":
         save_config()
         print(f"Fabric preference saved: use_fabric={args.fabric_state}")
 
+    # Handle --omniarchive-set to save preference in config
+    if args.omniarchive_state:
+        config["use_omniarchive"] = args.omniarchive_state
+        save_config()
+        print(f"Omniarchive preference saved: use_omniarchive={args.omniarchive_state}")
+
+    # Handle --scrape-omniarchive
+    if args.scrape_omniarchive:
+        scrape_omniarchive_index()
+        sys.exit(0)
+
     try:
         if args.version is None:
             start_gui()
             sys.exit(0)
 
+        # Determine omniarchive usage: CLI arg takes precedence, otherwise use config
+        use_omniarchive = args.use_omniarchive if args.use_omniarchive is not None else (config.get("use_omniarchive", "false").lower() == "true")
+
+        # If omniarchive is enabled but index doesn't exist, scrape it
+        if use_omniarchive and not load_omniarchive_index():
+            print("Omniarchive index not found. Scraping...")
+            scrape_omniarchive_index()
+
         # Determine fabric usage: CLI arg takes precedence, otherwise use config
         use_fabric = args.use_fabric if args.use_fabric is not None else (config.get("use_fabric", "false").lower() == "true")
 
-        if not verify_version(args.version):
+        if not verify_version(args.version, use_omniarchive=use_omniarchive):
             raise ValueError(f"Minecraft version {args.version} not found.")
 
-        info = download_game(args.version, workers=args.workers, use_fabric=use_fabric)
+        info = download_game(args.version, workers=args.workers, use_fabric=use_fabric, use_omniarchive=use_omniarchive)
 
         if args.run:
             if config["use_microsoft_account"].lower() == "true":
@@ -1079,7 +1317,7 @@ if __name__ == "__main__":
     except KeyError:
         exc_type, exc_value, exc_tb = sys.exc_info()
         tb = traceback.extract_tb(exc_tb)
-    
+
         if any("propclass.py" in frame.filename for frame in tb):
             print(f"Error! Invalid config file. Missing: {exc_value}")
         else:

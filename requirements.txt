@@ -2,3 +2,4 @@ requests
 tqdm
 javaproperties
 customtkinter
+beautifulsoup4
