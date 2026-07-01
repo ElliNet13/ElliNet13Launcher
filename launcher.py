@@ -565,7 +565,6 @@ def download_game(version, workers=30, use_fabric=False):
         "assets_dir": str(assets_dir),
         "version_dir": str(version_dir),
         "java_path": final_java_path,
-        "game_dir": "minecraft",
         "logging_config_path": str(logging_config_path) if logging_config_path else None,
         "fabric_loader_path": fabric_loader_path,
         "fabric_loader_version": fabric_loader_version,
@@ -624,13 +623,17 @@ def verify_version(version):
     return False
 
 # ---------------- START MINECRAFT ----------------
-def start_minecraft(info, version, username="Player", auth: MCMSA|None = None, profile:None|dict=None, minecraft_access_token:None|str=None, client_id: str | None = None, xuid: str | None = None, use_fabric: bool = None): # type: ignore
+def start_minecraft(info, version, username="Player", auth: MCMSA|None = None, profile:None|dict=None, minecraft_access_token:None|str=None, client_id: str | None = None, xuid: str | None = None, use_fabric: bool = None, game_dir: str = "minecraft"): # type: ignore
     version_json = info["version_json"]
     classpath = info["classpath"]
     natives_dir = info["natives_dir"]
 
-    game_dir = info.get("game_dir", "minecraft")
     assets_dir = info.get("assets_dir", "assets")
+
+    if not os.path.isabs(game_dir):
+        game_dir = str(Path.cwd() / "minecraft" / game_dir)
+
+    Path(game_dir).mkdir(parents=True, exist_ok=True)
 
     # Determine if we should use Fabric
     if use_fabric is None:
@@ -795,6 +798,7 @@ def start_gui():
         config["last_versions_list"] = save_list(lastVersionsList)
 
     version = ctk.StringVar()
+    gameDir = ctk.StringVar()
 
     maincontainer = ctk.CTkFrame(app, fg_color="transparent")
     maincontainer.place(relx=0.5, rely=0.5, anchor="center")
@@ -809,6 +813,15 @@ def start_gui():
     versionEntry = ctk.CTkEntry(container, textvariable=version)
 
     versionEntry.pack()
+
+    # ---------------- GAME DIRECTORY INPUT ----------------
+    gameDirLabel = ctk.CTkLabel(container, text="Game Data Directory")
+    gameDirLabel.pack(pady=5)
+
+    gameDirEntry = ctk.CTkEntry(container, textvariable=gameDir)
+    gameDirEntry.pack()
+
+    gameDirEntry.insert(0, config["dot_minecraft_dir"])
 
     # ---------------- FABRIC TOGGLE ----------------
     fabric_enabled = ctk.BooleanVar(value=config.get("use_fabric", "false").lower() == "true")
@@ -851,7 +864,7 @@ def start_gui():
         text="Play",
         command=lambda: threading.Thread(
             target=launch_from_gui,
-            args=(version, fabric_enabled, app, maincontainer, mainLabel, container),
+            args=(version, fabric_enabled, app, maincontainer, mainLabel, gameDir, container),
             daemon=True
         ).start()
     )
@@ -879,17 +892,20 @@ def start_gui():
 
     app.mainloop()
 
-def launch_from_gui(versionString: ctk.StringVar, fabricEnabled: ctk.BooleanVar, app: ctk.CTk, container: ctk.CTkFrame, mainLabel: ctk.CTkLabel, dcontainer: ctk.CTkFrame):
+def launch_from_gui(versionString: ctk.StringVar, fabricEnabled: ctk.BooleanVar, app: ctk.CTk, container: ctk.CTkFrame, mainLabel: ctk.CTkLabel, gameDir: ctk.StringVar, dcontainer: ctk.CTkFrame):
     def ui(fn):
         app.after(0, fn)
 
     try:
-
         version = versionString.get()
         use_fabric = fabricEnabled.get()
+        game_directory = gameDir.get()
 
         ui(lambda: dcontainer.destroy())
         ui(lambda: mainLabel.configure(text=f"Loading data for Minecraft version {version}..."))
+
+        config["dot_minecraft_dir"] = game_directory
+        save_config()
 
         if not verify_version(version):
             raise UserError(f"Version {version} not found.")
@@ -941,14 +957,14 @@ def launch_from_gui(versionString: ctk.StringVar, fabricEnabled: ctk.BooleanVar,
             ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}... (Microsoft account)"))
             time.sleep(1)
             ui(lambda: app.withdraw())
-            start_minecraft(info, version=version, minecraft_access_token=minecraft_access_token, profile=profile, use_fabric=use_fabric)
+            start_minecraft(info, version=version, minecraft_access_token=minecraft_access_token, profile=profile, use_fabric=use_fabric, game_dir=game_directory)
             ui(lambda: exit_gui(app))
             return
 
         ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}... (Offline account)"))
         time.sleep(1)
         ui(lambda: app.withdraw())
-        start_minecraft(info, version=version, username=config["username"], use_fabric=use_fabric)
+        start_minecraft(info, version=version, username=config["username"], use_fabric=use_fabric, game_dir=game_directory)
         ui(lambda: exit_gui(app))
     except UserError as e:
             ui(lambda: mainLabel.configure(text=str(e)))
@@ -1018,7 +1034,6 @@ def auth_microsoft_gui(auth: MCMSA, original_app: ctk.CTk, future: Future):
 
 
 # ---------------- MAIN ----------------
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--version", type=str, required=False)
@@ -1027,8 +1042,11 @@ if __name__ == "__main__":
     parser.add_argument("--fabric", action="store_true", dest="use_fabric")
     parser.add_argument("--no-fabric", action="store_false", dest="use_fabric")
     parser.add_argument("--fabric-set", type=str, dest="fabric_state", choices=["true", "false"], help="Set and save fabric state in config")
+    parser.add_argument("--data-dir", type=str, dest="data_dir", help="Set .minecraft directory")
 
     args = parser.parse_args()
+
+    dot_minecraft_dir: str = args.data_dir if args.data_dir else config["dot_minecraft_dir"]
 
     # Handle --fabric-set to save preference in config
     if args.fabric_state:
@@ -1054,7 +1072,7 @@ if __name__ == "__main__":
                 mcmsa = MCMSA()
             else:
                 mcmsa = None
-            start_minecraft(info, username=config["username"], version=args.version, auth=mcmsa, use_fabric=use_fabric)
+            start_minecraft(info, username=config["username"], version=args.version, auth=mcmsa, use_fabric=use_fabric, game_dir=dot_minecraft_dir)
     except KeyboardInterrupt:
         print("\nInterrupted by user. Stopping...")
         sys.exit(1)
