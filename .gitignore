@@ -221,6 +221,7 @@ __marimo__/
 minecraft_runtime/
 minecraft/
 logs/
+level.dat
 
 # Launcher files
 config.properties

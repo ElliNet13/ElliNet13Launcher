@@ -21,7 +21,10 @@ from concurrent.futures import Future
 import time
 import zlib
 import json
-import stat
+
+class UserError(Exception):
+    """Raise to show a error to the user when in GUI mode."""
+    pass
 
 # Load config
 configfile = "config.properties"
@@ -449,11 +452,14 @@ def download_game(version, workers=30, use_fabric=False):
     fabric_main_class = None
     fabric_lib_paths = []
     if use_fabric:
-        fabric_loader_path, fabric_loader_version, fabric_main_class, fabric_lib_paths = download_fabric_loader(
-            version, base_dir, libraries_dir, version_dir
-        )
-        print(f"Fabric {fabric_loader_version} downloaded for {version}")
-
+        try:
+            fabric_loader_path, fabric_loader_version, fabric_main_class, fabric_lib_paths = download_fabric_loader(
+                version, base_dir, libraries_dir, version_dir
+            )
+            print(f"Fabric {fabric_loader_version} downloaded for {version}")
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 400:
+                raise UserError(f"Fabric loader not found for Minecraft {version}.")
     # ---------------- ASSETS ----------------
     print("Downloading assets...")
 
@@ -514,22 +520,28 @@ def download_game(version, workers=30, use_fabric=False):
         if not check_rules(lib.get("rules", [])):
             continue
 
-        artifact = lib["downloads"].get("artifact")
-        if not artifact:
-            continue
+        downloads = lib["downloads"]
+        artifact = downloads.get("artifact")
 
-        lib_path = libraries_dir / artifact["path"]
-        lib_path.parent.mkdir(parents=True, exist_ok=True)
+        # Handle libraries with artifacts (main JARs)
+        if artifact:
+            lib_path = libraries_dir / artifact["path"]
+            lib_path.parent.mkdir(parents=True, exist_ok=True)
 
-        classpath.append(str(lib_path))
+            classpath.append(str(lib_path))
 
-        if safe_download(session, artifact["url"], lib_path):
-            print(f"Downloaded {artifact['path']}")
-        else:
-            print(f"Skipped {artifact['path']}")
+            if safe_download(session, artifact["url"], lib_path):
+                print(f"Downloaded {artifact['path']}")
+            else:
+                print(f"Skipped {artifact['path']}")
 
-        # natives - extract from classifier JARs
-        if "natives" in lib:
+        # Handle libraries with only classifiers (natives-only libraries)
+        # These don't have an artifact, just classifiers for platform-specific natives
+        # This is common in old versions (rd-132211, b1.0, 1.0, etc.)
+        if "natives" in lib and not artifact:
+            extract_natives(lib, natives_dir, session)
+        # Also extract natives for libraries that have both artifact and natives
+        elif "natives" in lib and artifact:
             extract_natives(lib, natives_dir, session)
 
     classpath.append(str(jar_path))
@@ -839,7 +851,7 @@ def start_gui():
         text="Play",
         command=lambda: threading.Thread(
             target=launch_from_gui,
-            args=(version, fabric_enabled, app, container, mainLabel, container),
+            args=(version, fabric_enabled, app, maincontainer, mainLabel, container),
             daemon=True
         ).start()
     )
@@ -871,73 +883,76 @@ def launch_from_gui(versionString: ctk.StringVar, fabricEnabled: ctk.BooleanVar,
     def ui(fn):
         app.after(0, fn)
 
-    version = versionString.get()
-    use_fabric = fabricEnabled.get()
+    try:
 
-    ui(lambda: dcontainer.destroy())
-    ui(lambda: mainLabel.configure(text=f"Loading data for Minecraft version {version}..."))
+        version = versionString.get()
+        use_fabric = fabricEnabled.get()
 
-    if not verify_version(version):
-        ui(lambda: mainLabel.configure(text=f"Version {version} not found."))
-        ui(lambda: ctk.CTkButton(container, text="Exit", command=lambda: exit_gui(app)).pack(pady=20))
-        return
-    
-    versions = load_list(config.get("last_versions_list", "")) or []
+        ui(lambda: dcontainer.destroy())
+        ui(lambda: mainLabel.configure(text=f"Loading data for Minecraft version {version}..."))
 
-    # remove duplicates of current version
-    versions = [v for v in versions if v != version]
+        if not verify_version(version):
+            raise UserError(f"Version {version} not found.")
 
-    # add to top
-    versions.insert(0, version)
+        versions = load_list(config.get("last_versions_list", "")) or []
 
-    config["last_versions_list"] = save_list(versions)
+        # remove duplicates of current version
+        versions = [v for v in versions if v != version]
 
-    ui(lambda: mainLabel.configure(text=f"Downloading Minecraft version {version}..."))
-    info = download_game(version, use_fabric=use_fabric)
+        # add to top
+        versions.insert(0, version)
 
-    ui(lambda: mainLabel.configure(text="Checking Microsoft authentication..."))
+        config["last_versions_list"] = save_list(versions)
 
-    if config["use_microsoft_account"].lower() == "true":
-        auth = MCMSA()
+        ui(lambda: mainLabel.configure(text=f"Downloading Minecraft version {version}..."))
+        info = download_game(version, use_fabric=use_fabric)
 
-        should_reauth = False
+        ui(lambda: mainLabel.configure(text="Checking Microsoft authentication..."))
 
-        if config.get("do_not_share_-_microsoft_account_refresh_token"):
-            try:
-                result = auth.refresh_and_get_minecraft(
-                    config["do_not_share_-_microsoft_account_refresh_token"]
-                )
-                config["do_not_share_-_microsoft_account_refresh_token"] = result["refresh_token"]
-                save_config()
+        if config["use_microsoft_account"].lower() == "true":
+            auth = MCMSA()
 
-                minecraft_access_token = result["minecraft_access_token"]
-                profile = result["profile"]
+            should_reauth = False
 
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 400:
-                    should_reauth = True
-        else:
-            should_reauth = True
+            if config.get("do_not_share_-_microsoft_account_refresh_token"):
+                try:
+                    result = auth.refresh_and_get_minecraft(
+                        config["do_not_share_-_microsoft_account_refresh_token"]
+                    )
+                    config["do_not_share_-_microsoft_account_refresh_token"] = result["refresh_token"]
+                    save_config()
 
-        if should_reauth:
-            future = Future()
-            ui(lambda: auth_microsoft_gui(auth, app, future))
-            result = future.result()
-            minecraft_access_token = result[0]
-            profile = result[1]
-        
-        ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}... (Microsoft account)"))
+                    minecraft_access_token = result["minecraft_access_token"]
+                    profile = result["profile"]
+
+                except requests.exceptions.HTTPError as e:
+                    if e.response.status_code == 400:
+                        should_reauth = True
+            else:
+                should_reauth = True
+
+            if should_reauth:
+                future = Future()
+                ui(lambda: auth_microsoft_gui(auth, app, future))
+                result = future.result()
+                minecraft_access_token = result[0]
+                profile = result[1]
+
+            ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}... (Microsoft account)"))
+            time.sleep(1)
+            ui(lambda: app.withdraw())
+            start_minecraft(info, version=version, minecraft_access_token=minecraft_access_token, profile=profile, use_fabric=use_fabric)
+            ui(lambda: exit_gui(app))
+            return
+
+        ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}... (Offline account)"))
         time.sleep(1)
         ui(lambda: app.withdraw())
-        start_minecraft(info, version=version, minecraft_access_token=minecraft_access_token, profile=profile, use_fabric=use_fabric)
+        start_minecraft(info, version=version, username=config["username"], use_fabric=use_fabric)
         ui(lambda: exit_gui(app))
-        return
-
-    ui(lambda: mainLabel.configure(text=f"Starting Minecraft version {version}... (Offline account)"))
-    time.sleep(1)
-    ui(lambda: app.withdraw())
-    start_minecraft(info, version=version, username=config["username"], use_fabric=use_fabric)
-    ui(lambda: exit_gui(app))
+    except UserError as e:
+            ui(lambda: mainLabel.configure(text=str(e)))
+            ui(lambda: ctk.CTkButton(container, text="Exit", command=lambda: exit_gui(app)).pack(pady=20))
 
 def copy_to_clipboard(text: str, app: ctk.CTk):
     app.clipboard_clear()
