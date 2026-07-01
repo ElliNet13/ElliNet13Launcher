@@ -271,7 +271,32 @@ def parse_game_arguments(version_json, version, game_dir, assets_dir, asset_inde
 
 # ---------------- NATIVES ----------------
 
-def extract_natives(lib, lib_path, natives_dir):
+def should_extract_file(file_path, extract_rules):
+    """
+    Check if a file should be extracted based on exclude rules.
+    extract_rules example: {"exclude": ["META-INF/"]}
+    """
+    if not extract_rules:
+        return True
+
+    exclude_patterns = extract_rules.get("exclude", [])
+    if not exclude_patterns:
+        return True
+
+    for pattern in exclude_patterns:
+        if file_path.startswith(pattern) or file_path.startswith("/" + pattern):
+            return False
+    return True
+
+
+def extract_natives(lib, natives_dir, session):
+    """
+    Extract native libraries from classifier JARs.
+
+    For both legacy and modern versions, natives are stored in separate classifier JARs,
+    not in the main artifact. The library's 'natives' field maps OS names to classifier keys,
+    and 'downloads.classifiers' contains the actual native JAR URLs.
+    """
     if "natives" not in lib:
         return
 
@@ -280,13 +305,45 @@ def extract_natives(lib, lib_path, natives_dir):
         os_name = "osx"
 
     natives_map = lib.get("natives", {})
-    native_os_key = natives_map.get(os_name)
+    native_classifier_key = natives_map.get(os_name)
 
-    if not native_os_key:
+    if not native_classifier_key:
         return
 
-    with zipfile.ZipFile(lib_path, "r") as jar:
+    # Get the classifiers
+    downloads = lib.get("downloads", {})
+    classifiers = downloads.get("classifiers", {})
+
+    classifier_info = classifiers.get(native_classifier_key)
+    if not classifier_info:
+        return
+
+    # Download the native classifier JAR
+    classifier_url = classifier_info.get("url")
+    classifier_path = classifier_info.get("path")
+
+    if not classifier_url or not classifier_path:
+        return
+
+    # Use libraries_dir for storing the classifier JAR
+    libraries_dir = Path("minecraft_runtime/libraries")
+    classifier_jar_path = libraries_dir / classifier_path
+
+    # Download if needed
+    if safe_download(session, classifier_url, classifier_jar_path):
+        print(f"Downloaded native classifier: {classifier_path}")
+    else:
+        print(f"Skipped native classifier: {classifier_path}")
+
+    # Get extract rules (some libraries have exclusions like META-INF/)
+    extract_rules = lib.get("extract")
+
+    # Extract native files from the classifier JAR
+    with zipfile.ZipFile(classifier_jar_path, "r") as jar:
         for file in jar.namelist():
+            if not should_extract_file(file, extract_rules):
+                continue
+
             if file.endswith((".dll", ".so", ".dylib")):
                 out_path = os.path.join(natives_dir, os.path.basename(file))
 
@@ -471,9 +528,9 @@ def download_game(version, workers=30, use_fabric=False):
         else:
             print(f"Skipped {artifact['path']}")
 
-        # natives
+        # natives - extract from classifier JARs
         if "natives" in lib:
-            extract_natives(lib, lib_path, natives_dir)
+            extract_natives(lib, natives_dir, session)
 
     classpath.append(str(jar_path))
 
