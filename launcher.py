@@ -496,169 +496,199 @@ def download_game(version, workers=30, use_fabric=False, use_omniarchive=False):
     java_runtime_dir.mkdir(parents=True, exist_ok=True)
     natives_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check for Omniarchive version
     omniarchive_jar_url = None
     version_info = None
-
     print("Downloading manifest...")
     manifest = grab_minecraft_manifest()
-
     version_info = next(
         (v for v in manifest["versions"] if v["id"] == version),
         None
     )
-
-    if not version_info:
-        # Try Omniarchive if not in official manifest
-        if use_omniarchive:
-            omniarchive_jar_url = find_omniarchive_version(version)
-            if omniarchive_jar_url:
-                print(f"Version {version} not in official manifest, using Omniarchive...")
-                # For Omniarchive, we need to find a nearby version for libraries/assets
-                # Find the closest version from official manifest
-                all_versions = [v["id"] for v in manifest["versions"]]
-                closest_version = None
-                for v in reversed(all_versions):
-                    # Try to find a version that might have the same assets
-                    if v < version:
-                        closest_version = v
-                        break
-                if not closest_version:
-                    closest_version = manifest["latest"]["release"]
-
-                # Get version JSON from closest version
-                version_info = next(
-                    (v for v in manifest["versions"] if v["id"] == closest_version),
-                    None
-                )
-                if not version_info:
-                    raise ValueError(f"Could not find closest version for {version}")
-                print(f"Using {closest_version} as base for libraries and assets...")
-            else:
-                raise ValueError(f"Version {version} not found")
-        else:
-            raise ValueError(f"Version {version} not found")
-
     print("Downloading version JSON...")
     version_json = grab_version_json(version_info)
 
-    # Download Fabric if enabled
+    should_download = config.get("download_game", "true").lower() not in {"false", "0", "no", "off"}
+    logging_config_path = None
     fabric_loader_path = None
     fabric_loader_version = None
     fabric_main_class = None
     fabric_lib_paths = []
-    if use_fabric:
-        try:
-            fabric_loader_path, fabric_loader_version, fabric_main_class, fabric_lib_paths = download_fabric_loader(
-                version, base_dir, libraries_dir, version_dir
-            )
-            print(f"Fabric {fabric_loader_version} downloaded for {version}")
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 400:
-                raise UserError(f"Fabric loader not found for Minecraft {version}.")
-    # ---------------- ASSETS ----------------
-    print("Downloading assets...")
 
-    asset_index_url = version_json["assetIndex"]["url"]
-    r = session.get(asset_index_url)
-    r.raise_for_status()
-    asset_index = r.json()
+    if should_download:
+        if not version_info:
+            # Try Omniarchive if not in official manifest
+            if use_omniarchive:
+                omniarchive_jar_url = find_omniarchive_version(version)
+                if omniarchive_jar_url:
+                    print(f"Version {version} not in official manifest, using Omniarchive...")
+                    # For Omniarchive, we need to find a nearby version for libraries/assets
+                    # Find the closest version from official manifest
+                    all_versions = [v["id"] for v in manifest["versions"]]
+                    closest_version = None
+                    for v in reversed(all_versions):
+                        # Try to find a version that might have the same assets
+                        if v < version:
+                            closest_version = v
+                            break
+                    if not closest_version:
+                        closest_version = manifest["latest"]["release"]
 
-    indexes_dir = assets_dir / "indexes"
-    indexes_dir.mkdir(parents=True, exist_ok=True)
-
-    index_id = version_json["assetIndex"]["id"]
-    index_path = indexes_dir / f"{index_id}.json"
-
-    if not index_path.exists():
-        with open(index_path, "w", encoding="utf-8") as f:
-            import json
-            json.dump(asset_index, f)
-
-    download_assets(
-        asset_index,
-        output_dir=str(assets_dir),
-        workers=workers
-    )
-
-    # ---------------- CLIENT JAR ----------------
-    print("Checking client jar...")
-
-    # Use Omniarchive URL if available, otherwise use official
-    if omniarchive_jar_url:
-        jar_url = omniarchive_jar_url
-        print(f"Using Omniarchive JAR: {jar_url}")
-    else:
-        jar_url = version_json["downloads"]["client"]["url"]
-
-    jar_path = version_dir / f"{version}.jar"
-
-    if safe_download(session, jar_url, jar_path):
-        print("Downloaded client jar")
-    else:
-        print("Client jar already exists, skipping")
-
-    # ---------------- LOGGING CONFIG ----------------
-    logging_config_path = None
-    if "logging" in version_json and "client" in version_json["logging"]:
-        logging_info = version_json["logging"]["client"]
-        if "file" in logging_info:
-            logging_file = logging_info["file"]
-            logging_url = logging_file["url"]
-            logging_config_path = version_dir / logging_file["id"]
-            if safe_download(session, logging_url, logging_config_path):
-                print(f"Downloaded logging config: {logging_file['id']}")
+                    # Get version JSON from closest version
+                    version_info = next(
+                        (v for v in manifest["versions"] if v["id"] == closest_version),
+                        None
+                    )
+                    if not version_info:
+                        raise ValueError(f"Could not find closest version for {version}")
+                    print(f"Using {closest_version} as base for libraries and assets...")
+                else:
+                    raise ValueError(f"Version {version} not found")
             else:
-                print("Logging config already exists, skipping")
+                raise ValueError(f"Version {version} not found")
 
-    # ---------------- LIBRARIES ----------------
-    print("Downloading libraries...")
-    classpath = []
+        # Download Fabric if enabled
+        fabric_loader_path = None
+        fabric_loader_version = None
+        fabric_main_class = None
+        fabric_lib_paths = []
+        if use_fabric:
+            try:
+                fabric_loader_path, fabric_loader_version, fabric_main_class, fabric_lib_paths = download_fabric_loader(
+                    version, base_dir, libraries_dir, version_dir
+                )
+                print(f"Fabric {fabric_loader_version} downloaded for {version}")
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 400:
+                    raise UserError(f"Fabric loader not found for Minecraft {version}.")
+        # ---------------- ASSETS ----------------
+        print("Downloading assets...")
 
-    for lib in tqdm(version_json["libraries"], desc="Libraries"):
-        if "downloads" not in lib:
-            continue
+        asset_index_url = version_json["assetIndex"]["url"]
+        r = session.get(asset_index_url)
+        r.raise_for_status()
+        asset_index = r.json()
 
-        if not check_rules(lib.get("rules", [])):
-            continue
+        indexes_dir = assets_dir / "indexes"
+        indexes_dir.mkdir(parents=True, exist_ok=True)
 
-        downloads = lib["downloads"]
-        artifact = downloads.get("artifact")
+        index_id = version_json["assetIndex"]["id"]
+        index_path = indexes_dir / f"{index_id}.json"
 
-        # Handle libraries with artifacts (main JARs)
-        if artifact:
-            lib_path = libraries_dir / artifact["path"]
-            lib_path.parent.mkdir(parents=True, exist_ok=True)
+        if not index_path.exists():
+            with open(index_path, "w", encoding="utf-8") as f:
+                import json
+                json.dump(asset_index, f)
 
-            classpath.append(str(lib_path))
+        download_assets(
+            asset_index,
+            output_dir=str(assets_dir),
+            workers=workers
+        )
 
-            if safe_download(session, artifact["url"], lib_path):
-                print(f"Downloaded {artifact['path']}")
-            else:
-                print(f"Skipped {artifact['path']}")
+        # ---------------- CLIENT JAR ----------------
+        print("Checking client jar...")
 
-        # Handle libraries with only classifiers (natives-only libraries)
-        # These don't have an artifact, just classifiers for platform-specific natives
-        # This is common in old versions (rd-132211, b1.0, 1.0, etc.)
-        if "natives" in lib and not artifact:
-            extract_natives(lib, natives_dir, session)
-        # Also extract natives for libraries that have both artifact and natives
-        elif "natives" in lib and artifact:
-            extract_natives(lib, natives_dir, session)
+        # Use Omniarchive URL if available, otherwise use official
+        if omniarchive_jar_url:
+            jar_url = omniarchive_jar_url
+            print(f"Using Omniarchive JAR: {jar_url}")
+        else:
+            jar_url = version_json["downloads"]["client"]["url"]
 
-    classpath.append(str(jar_path))
+        jar_path = version_dir / f"{version}.jar"
 
-    # ---------------- JAVA RUNTIME ----------------
-    print("Downloading java runtime...")
-    java_runtime_dir = java_runtime_dir / version_json["javaVersion"]["component"]
-    download_java_runtime(version_json, java_runtime_dir)
+        if safe_download(session, jar_url, jar_path):
+            print("Downloaded client jar")
+        else:
+            print("Client jar already exists, skipping")
 
-    print("Done downloading Minecraft.")
+        # ---------------- LOGGING CONFIG ----------------
+        logging_config_path = None
+        if "logging" in version_json and "client" in version_json["logging"]:
+            logging_info = version_json["logging"]["client"]
+            if "file" in logging_info:
+                logging_file = logging_info["file"]
+                logging_url = logging_file["url"]
+                logging_config_path = version_dir / logging_file["id"]
+                if safe_download(session, logging_url, logging_config_path):
+                    print(f"Downloaded logging config: {logging_file['id']}")
+                else:
+                    print("Logging config already exists, skipping")
 
-    final_java_path = str(java_runtime_dir / "bin/java")
+        # ---------------- LIBRARIES ----------------
+        print("Downloading libraries...")
+        classpath = []
 
-    if platform.system() == "Windows":
-        final_java_path += ".exe"
+        for lib in tqdm(version_json["libraries"], desc="Libraries"):
+            if "downloads" not in lib:
+                continue
+
+            if not check_rules(lib.get("rules", [])):
+                continue
+
+            downloads = lib["downloads"]
+            artifact = downloads.get("artifact")
+
+            # Handle libraries with artifacts (main JARs)
+            if artifact:
+                lib_path = libraries_dir / artifact["path"]
+                lib_path.parent.mkdir(parents=True, exist_ok=True)
+
+                classpath.append(str(lib_path))
+
+                if safe_download(session, artifact["url"], lib_path):
+                    print(f"Downloaded {artifact['path']}")
+                else:
+                    print(f"Skipped {artifact['path']}")
+
+            # Handle libraries with only classifiers (natives-only libraries)
+            # These don't have an artifact, just classifiers for platform-specific natives
+            # This is common in old versions (rd-132211, b1.0, 1.0, etc.)
+            if "natives" in lib and not artifact:
+                extract_natives(lib, natives_dir, session)
+            # Also extract natives for libraries that have both artifact and natives
+            elif "natives" in lib and artifact:
+                extract_natives(lib, natives_dir, session)
+
+        classpath.append(str(jar_path))
+
+        # ---------------- JAVA RUNTIME ----------------
+        print("Downloading java runtime...")
+        java_runtime_dir = java_runtime_dir / version_json["javaVersion"]["component"]
+        download_java_runtime(version_json, java_runtime_dir)
+
+        print("Done downloading Minecraft.")
+
+        final_java_path = str(java_runtime_dir / "bin/java")
+
+        if platform.system() == "Windows":
+            final_java_path += ".exe"
+    else:
+        print("Using cached Minecraft installation.")
+        classpath = []
+
+        for lib in version_json.get("libraries", []):
+            if "downloads" not in lib:
+                continue
+
+            if not check_rules(lib.get("rules", [])):
+                continue
+
+            artifact = lib["downloads"].get("artifact")
+            if artifact:
+                lib_path = libraries_dir / artifact["path"]
+                if lib_path.exists():
+                    classpath.append(str(lib_path))
+
+        jar_path = version_dir / f"{version}.jar"
+        if jar_path.exists():
+            classpath.append(str(jar_path))
+
+        runtime_dir = java_runtime_dir / version_json["javaVersion"]["component"]
+        final_java_path = str(runtime_dir / "bin/java")
+
+        if platform.system() == "Windows":
+            final_java_path += ".exe"
 
     return {
         "version_json": version_json,
