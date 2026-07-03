@@ -996,7 +996,7 @@ def start_gui():
         variable=omniarchive_enabled,
         command=toggle_omniarchive
     )
-    omniarchive_checkbox.pack(pady=(10, 5))
+    #omniarchive_checkbox.pack(pady=(10, 5))
 
     # ---------------- OMNIARCHIVE BROWSER BUTTON ----------------
     def open_omniarchive_browser():
